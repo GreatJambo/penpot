@@ -98,7 +98,7 @@ https://dhi.io/token?scope=repository%3Anginx%3Apull&service=registry.docker.io
 
 磁盘：评估时根分区还剩大约 300GB。devenv 约 5GB，官方 exporter 镜像约 2GB，四份本地镜像再加几 GB，够用。不要用 GPU。这台机器评估时两张 GPU 被别的推理进程占着；脚本里的编译容器用 `--runtime=runc`，不申请 GPU，默认 `--cpus=12`（机器 64 核）。
 
-时间量级（这次预演的实测写在文末）：backend bundle 大约一分钟；exporter / frontend 的 shadow-cljs release 和 wasm 是主要耗时，按十几分钟到几十分钟估计；镜像层主要是 apt 和 playwright 的 Chromium 下载。
+2026-10-27 在这台 64 核机器上、编译容器限 12 CPU / 32GB 的实测（devenv 和基础镜像已经 pull 完）：四个 bundle 一共约 5 分 21 秒（backend 33 秒、exporter 38 秒、mcp 13 秒、frontend 含 wasm 与 shadow-cljs 3 分 57 秒）。四份镜像再约 2 分 30 秒（backend 32 秒、exporter 约 80 秒、mcp 15 秒、frontend 19 秒）。冷启动还要加上 `penpotapp/devenv:latest`（约 4.7GB）和基础镜像的下载。公开基础镜像打出来的体积：frontend 728MB、backend 814MB、exporter 2.97GB、mcp 1.29GB。官方 DHI 镜像大约是 frontend 672MB、backend 774MB、exporter 2.08GB、mcp 195MB。mcp 差得最多，因为公开的 `node:24.20.0-trixie` 不是 DHI 的 runtime 变体。
 
 ## 3. 本地镜像怎么挂上 compose
 
@@ -181,7 +181,7 @@ docker exec penpot-penpot-postgres-1 \
 
 ### 停机
 
-只重建 frontend、backend、exporter、mcp 四个容器。Postgres 和 Valkey 的镜像没变，卷也不换。backend 是 JVM，起来要一会儿。按这次机器的体量，HTTP 中断大约 **1–3 分钟**（镜像已经在本地的前提下）。没有在现网上实际切过，这个数字是容器重建加 JVM 启动的估计，不是计时过的现网切换。
+只重建 frontend、backend、exporter、mcp 四个容器。Postgres 和 Valkey 的镜像没变，卷也不换。预演里 backend 容器起来后大约 15 秒写到 `welcome to penpot`（版本 `2.18.3`），frontend 的静态页在那之前就已经 200。镜像已经在本地时，现网切换的 HTTP 中断按 **大约 1 分钟** 估计。没有在现网上实际切过。如果还要现场 pull 镜像，时间另算。
 
 ### 回滚到 `penpotapp/*:2.18`
 
@@ -248,10 +248,29 @@ git diff --stat 2.18.3..2.18.5 -- backend/src/app/migrations
 
 `develop` 会继续往前走。合文档类 PR 进 `develop` 不会把现网基线改成 develop；打现网镜像时 checkout 的仍然必须是 `2.18.3`（或你下一次有意升级到的那个 tag）。
 
-## 5. 预演（2026-10-27）
+## 5. 预演（2026-10-27）：通过
 
-原则：现网项目 `penpot` 只做 `pg_dump` 和 assets 卷的只读拷贝。另一套 compose 项目 `penpot-rehearsal`，端口 `127.0.0.1:9101`，自己的卷，用完即删。mailcatch 不占 1080。不改 Cloudflare。编译限制 12 CPU、32GB 内存，runtime `runc`。
+原则：现网项目 `penpot` 只做 `pg_dump` 和 assets 卷的只读挂载。另一套 compose 项目 `penpot-rehearsal`，端口 `127.0.0.1:9101`，自己的卷，测完 `down -v` 并删掉拷贝。mailcatch 绑在 `127.0.0.1:1081`，避开现网的 1080。不改 Cloudflare。编译限制 12 CPU、32GB 内存，runtime `runc`，不用 GPU。
 
-预演镜像用 `scripts/build-selfhost-images.sh --public-bases`（因为没有 DHI 登录）。源码是未修改的 `2.18.3`。admin-console 用官方 `penpotapp/admin-console:2.18`。
+镜像是 `scripts/build-selfhost-images.sh --public-bases --skip-bundles --tag 2.18.3 --prefix penpot-local`。bundle 来自未改过的 `2.18.3` 源码（文档提交不进 bundle）。四份镜像里的 `version.txt` 都是 `2.18.3`。admin-console 用官方 `penpotapp/admin-console:2.18`。预演用了新生成的 `PENPOT_SECRET_KEY`（没有读现网 `.env`），`PENPOT_PUBLIC_URI=http://127.0.0.1:9101`，并加了 `disable-secure-session-cookies`，这样 HTTP 上能种 cookie。密码哈希不依赖 secret key；拷贝库上的那一个 profile 被改成了预演专用密码，现网库没有写过。
 
-结果见下一次提交补上的实测小节。脚本和覆盖文件先落在这个分支上，避免预演用的命令和仓库里的脚本分叉。
+| 检查 | 结果 |
+|---|---|
+| 官方 Dockerfile 不改 FROM | 失败，`dhi.io` 401。这是预期。 |
+| 四个 bundle + 四份 `penpot-local/*:2.18.3` | 成功 |
+| `pg_dump` custom format | 4.7MB。assets 只读拷贝 42.9MB |
+| 恢复后、backend 启动前 | `migrations` 163 行，最新 `2026-10-06 19:10:31` |
+| backend 日志 | 有 `running migrations`，**没有** `apply migration`。随后 `welcome to penpot`，`version=2.18.3` |
+| backend 启动后 | 仍是 163 行，最新时间戳没变 |
+| admin-console | 日志有 “Database migrations applied”。`drizzle.__drizzle_migrations` 仍是 8 行；`public` / `drizzle` / `nitrate` 的表数量与现网一致（60 / 1 / 9）。这是它自己的 schema，不是 Penpot `main` 迁移 |
+| `GET /` | 200，标题 `Penpot \| Full-stack design` |
+| 登录 `POST /api/rpc/command/login-with-password` | 200，种下 cookie `auth-token` |
+| `get-all-projects` + `get-project-files` | 3 个项目、5 个文件，与现网 `deleted_at IS NULL` 的计数一致：Drafts（Academic Talk Slide Masters、Pencil \| Penpot Design System、New File 1）、Style Guide - OSDI-SOSP Systems、Style Guide - Systems Hybrid |
+| `GET /plugins/mcp/manifest.json` | 200，`Penpot MCP Plugin` |
+| `GET /mcp/stream` | 无 `Accept: text/event-stream` 时 406，带上之后 400 `Server not initialized`。都是 MCP 进程经 frontend 返回的 JSON-RPC。容器日志里注册了 `execute_code`、`high_level_overview`、`penpot_api_info`、`export_shape`，并在听 4401/4402 |
+| 拆除 | `docker compose -p penpot-rehearsal down -v`，再删掉 compose 不认领的 assets 卷和编译缓存卷。拷贝的 dump 和预演密码已删 |
+| 现网 | 八个容器的 `StartedAt` 仍是 2026-10-06。前后 `http://127.0.0.1:9001/` 都是 200。剩下的 Penpot 卷只有 `penpot_penpot_postgres_v15` 和 `penpot_penpot_assets` |
+
+没有在浏览器里走 Cloudflare，也没有打开设计文件去连 MCP 插件。`/mcp/stream` 的 400/406 只说明服务在应答，不代表一次完整的工具调用。
+
+本地还留着 `penpot-local/{frontend,backend,exporter,mcp}:2.18.3` 和 pull 下来的 `penpotapp/devenv:latest`、`penpotapp/imagemagick:7.1.2-27`。没有 push 到任何 registry。
