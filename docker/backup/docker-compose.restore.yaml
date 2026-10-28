@@ -1,0 +1,121 @@
+# Throwaway Penpot restore. Copy this file to
+# /home/jambo/penpot-restore/docker-compose.yaml and run it only as
+#   docker compose -p penpot-restore -f /home/jambo/penpot-restore/docker-compose.yaml
+# Never pass -f /home/jambo/penpot/docker-compose.yaml. That file publishes
+# host port 9001 and is the live project `penpot`. `docker compose down -v`
+# against it deletes the live volumes.
+#
+# Images are local tags of the running 2.18.3 IDs. pull_policy: never.
+# Set PENPOT_RESTORE_PASSWORD and PENPOT_RESTORE_SECRET in the environment
+# for this shell only. Do not commit them and do not copy ~/penpot/.env.
+
+name: penpot-restore
+
+services:
+  penpot-frontend:
+    image: penpot-pinned/frontend:2.18.3
+    pull_policy: never
+    restart: "no"
+    ports:
+      - "127.0.0.1:9101:8080"
+    volumes:
+      - penpot_assets:/opt/data/assets
+    depends_on:
+      - penpot-backend
+      - penpot-exporter
+    networks: [penpot]
+    environment:
+      PENPOT_FLAGS: "disable-email-verification enable-smtp enable-prepl-server enable-mcp enable-admin-console disable-registration"
+      PENPOT_PUBLIC_URI: http://127.0.0.1:9101
+      PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "367001600"
+      PENPOT_HTTP_SERVER_MAX_MULTIPART_BODY_SIZE: "367001600"
+
+  penpot-backend:
+    image: penpot-pinned/backend:2.18.3
+    pull_policy: never
+    restart: "no"
+    volumes:
+      - penpot_assets:/opt/data/assets
+    depends_on:
+      - penpot-postgres
+      - penpot-valkey
+    networks: [penpot]
+    environment:
+      PENPOT_FLAGS: "disable-email-verification enable-smtp enable-prepl-server enable-mcp enable-admin-console disable-registration"
+      PENPOT_PUBLIC_URI: http://127.0.0.1:9101
+      PENPOT_DATABASE_URI: postgresql://penpot-postgres/penpot
+      PENPOT_DATABASE_USERNAME: penpot
+      PENPOT_DATABASE_PASSWORD: ${PENPOT_RESTORE_PASSWORD:?set PENPOT_RESTORE_PASSWORD}
+      PENPOT_REDIS_URI: redis://penpot-valkey/0
+      PENPOT_SECRET_KEY: ${PENPOT_RESTORE_SECRET:?set PENPOT_RESTORE_SECRET}
+      PENPOT_OBJECTS_STORAGE_BACKEND: fs
+      PENPOT_OBJECTS_STORAGE_FS_DIRECTORY: /opt/data/assets
+      PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "367001600"
+      PENPOT_HTTP_SERVER_MAX_MULTIPART_BODY_SIZE: "367001600"
+      PENPOT_TELEMETRY_ENABLED: "false"
+      PENPOT_TELEMETRY_REFERER: restore
+      PENPOT_SMTP_DEFAULT_FROM: no-reply@example.com
+      PENPOT_SMTP_DEFAULT_REPLY_TO: no-reply@example.com
+      PENPOT_SMTP_HOST: "127.0.0.1"
+      PENPOT_SMTP_PORT: "1025"
+      PENPOT_SMTP_SSL: "false"
+      PENPOT_SMTP_TLS: "false"
+      PENPOT_SMTP_USERNAME: ""
+      PENPOT_SMTP_PASSWORD: ""
+
+  penpot-exporter:
+    image: penpot-pinned/exporter:2.18.3
+    pull_policy: never
+    restart: "no"
+    depends_on:
+      - penpot-valkey
+    networks: [penpot]
+    environment:
+      PENPOT_FLAGS: "disable-email-verification enable-smtp enable-prepl-server enable-mcp enable-admin-console disable-registration"
+      PENPOT_PUBLIC_URI: http://127.0.0.1:9101
+      PENPOT_INTERNAL_URI: http://penpot-frontend:8080
+      PENPOT_REDIS_URI: redis://penpot-valkey/0
+      PENPOT_SECRET_KEY: ${PENPOT_RESTORE_SECRET:?set PENPOT_RESTORE_SECRET}
+
+  penpot-postgres:
+    image: penpot-pinned/postgres:15
+    pull_policy: never
+    restart: "no"
+    volumes:
+      - penpot_postgres_v15:/var/lib/postgresql/data
+    networks: [penpot]
+    environment:
+      POSTGRES_DB: penpot
+      POSTGRES_USER: penpot
+      POSTGRES_PASSWORD: ${PENPOT_RESTORE_PASSWORD:?set PENPOT_RESTORE_PASSWORD}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U penpot"]
+      interval: 2s
+      timeout: 10s
+      retries: 30
+      start_period: 5s
+
+  penpot-valkey:
+    image: penpot-pinned/valkey:8.1
+    pull_policy: never
+    restart: "no"
+    networks: [penpot]
+    environment:
+      VALKEY_EXTRA_FLAGS: "--maxmemory 128mb --maxmemory-policy volatile-lfu"
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli ping | grep PONG"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+
+volumes:
+  penpot_postgres_v15:
+    name: penpot-restore_postgres_v15
+  penpot_assets:
+    name: penpot-restore_assets
+
+networks:
+  penpot:
+    name: penpot-restore_net
