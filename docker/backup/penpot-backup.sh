@@ -9,26 +9,25 @@
 # at run time. This script does not contain credentials and does not write
 # them to filenames or the log.
 #
-# Defaults match the penpot compose project on this host. Override with:
+# Defaults match this host: backups live on /mnt/sdg, a different disk from
+# Docker. Override with:
 #   BACKUP_ROOT, PENPOT_PG_CONTAINER, PENPOT_ASSETS_VOLUME, PENPOT_TAR_IMAGE,
-#   PENPOT_KEEP_DAILY, PENPOT_KEEP_WEEKLY
+#   PENPOT_KEEP_DAILY
 
 set -euo pipefail
 umask 077
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-BACKUP_ROOT="${BACKUP_ROOT:-${HOME}/penpot-backups}"
+BACKUP_ROOT="${BACKUP_ROOT:-/mnt/sdg/penpot-backups}"
 DAILY_DIR="${BACKUP_ROOT}/daily"
-WEEKLY_DIR="${BACKUP_ROOT}/weekly"
 LOG_FILE="${BACKUP_ROOT}/penpot-backup.log"
 LOCK_FILE="${BACKUP_ROOT}/penpot-backup.lock"
 PG_CONTAINER="${PENPOT_PG_CONTAINER:-penpot-penpot-postgres-1}"
 ASSETS_VOLUME="${PENPOT_ASSETS_VOLUME:-penpot_penpot_assets}"
 # Userspace for tar/gzip and pg_restore. Must already be local; --pull never.
 TAR_IMAGE="${PENPOT_TAR_IMAGE:-postgres:15}"
-KEEP_DAILY="${PENPOT_KEEP_DAILY:-7}"
-KEEP_WEEKLY="${PENPOT_KEEP_WEEKLY:-4}"
+KEEP_DAILY="${PENPOT_KEEP_DAILY:-3}"
 LOG_CAP_BYTES=1048576
 PARTIAL_MAX_AGE_MIN=120
 
@@ -114,18 +113,38 @@ cap_log() {
   chmod 600 "$LOG_FILE" || { reason=log_rotate_failed; exit 1; }
 }
 
+# Refuse to create a backup tree on the same filesystem as Docker data.
+# /mnt/sdg must be a mount, and BACKUP_ROOT's parent must already exist and
+# must not share a device id with the Docker root directory.
+backup_disk_ok() {
+  local parent docker_root parent_dev docker_dev
+  mountpoint -q /mnt/sdg || return 1
+  parent="$(dirname -- "$BACKUP_ROOT")"
+  [[ -d "$parent" ]] || return 1
+  docker_root="$(docker info -f '{{.DockerRootDir}}' 2>/dev/null)" || return 1
+  [[ -n "$docker_root" && -e "$docker_root" ]] || return 1
+  parent_dev="$(stat -c '%d' -- "$parent")" || return 1
+  docker_dev="$(stat -c '%d' -- "$docker_root")" || return 1
+  [[ "$parent_dev" != "$docker_dev" ]]
+}
+
+fail_backup_disk() {
+  local now
+  now="$(date -Iseconds)"
+  printf '%s start=%s end=%s status=failed db=- db_bytes=0 assets=- assets_bytes=0 reason=backup_disk_missing\n' \
+    "$now" "$now" "$now" >&2
+  exit 1
+}
+
 remove_old_partials() {
-  local dir
-  for dir in "$DAILY_DIR" "$WEEKLY_DIR"; do
-    if [[ ! -d "$dir" ]]; then
-      reason=prune_failed
-      exit 1
-    fi
-    if ! find "$dir" -maxdepth 1 -type f -name '.penpot-*.partial' -mmin +${PARTIAL_MAX_AGE_MIN} -delete; then
-      reason=prune_failed
-      exit 1
-    fi
-  done
+  if [[ ! -d "$DAILY_DIR" ]]; then
+    reason=prune_failed
+    exit 1
+  fi
+  if ! find "$DAILY_DIR" -maxdepth 1 -type f -name '.penpot-*.partial' -mmin +${PARTIAL_MAX_AGE_MIN} -delete; then
+    reason=prune_failed
+    exit 1
+  fi
 }
 
 remove_orphan_assets() {
@@ -178,8 +197,12 @@ prune_dir() {
 }
 
 main() {
-  mkdir -p "$DAILY_DIR" "$WEEKLY_DIR"
-  chmod 700 "$BACKUP_ROOT" "$DAILY_DIR" "$WEEKLY_DIR"
+  if ! backup_disk_ok; then
+    fail_backup_disk
+  fi
+
+  mkdir -p "$DAILY_DIR"
+  chmod 700 "$BACKUP_ROOT" "$DAILY_DIR"
   touch "$LOG_FILE" "$LOCK_FILE"
   chmod 600 "$LOG_FILE" "$LOCK_FILE"
 
@@ -197,10 +220,8 @@ main() {
   fi
 
   require_positive_int "$KEEP_DAILY"
-  require_positive_int "$KEEP_WEEKLY"
   remove_old_partials
   remove_orphan_assets "$DAILY_DIR"
-  remove_orphan_assets "$WEEKLY_DIR"
 
   if ! command -v docker >/dev/null 2>&1; then
     reason=docker_missing
@@ -294,15 +315,7 @@ main() {
   db_tmp=""
   assets_tmp=""
 
-  # Sunday in the machine's local timezone. Hard links: deleting a daily name
-  # later does not remove the weekly copy.
-  if [[ "$(date +%u)" -eq 7 ]]; then
-    ln -f "${DAILY_DIR}/${db_name}" "${WEEKLY_DIR}/${db_name}"
-    ln -f "${DAILY_DIR}/${assets_name}" "${WEEKLY_DIR}/${assets_name}"
-  fi
-
   prune_dir "$DAILY_DIR" "$KEEP_DAILY" "$stamp"
-  prune_dir "$WEEKLY_DIR" "$KEEP_WEEKLY" "$stamp"
 
   status=ok
   reason=
