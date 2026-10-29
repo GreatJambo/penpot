@@ -1,0 +1,38 @@
+# Presenter sidecar. Use it as a second compose file on an existing
+# Penpot 2.18.5 project. It does not replace penpot-frontend,
+# penpot-backend, penpot-exporter, or penpot-mcp.
+#
+#   export PENPOT_PRESENTER_DIR=$PWD/docker/presenter
+#   docker build -t penpot-presenter:2.18.5 docker/presenter
+#   docker compose -p penpot --pull never \
+#     -f ~/penpot/docker-compose.yaml \
+#     -f docker/presenter/docker-compose.yaml \
+#     up -d penpot-presenter
+#   docker compose -p penpot --pull never \
+#     -f ~/penpot/docker-compose.yaml \
+#     -f docker/presenter/docker-compose.yaml \
+#     up -d --no-deps --force-recreate penpot-frontend
+#
+# The page is only at /presenter/ on the Penpot origin. Port 8080 stays
+# on the compose network. It is not published on the host.
+
+services:
+  penpot-frontend:
+    volumes:
+      - ${PENPOT_PRESENTER_DIR:?set PENPOT_PRESENTER_DIR}/nginx-presenter.conf:/etc/nginx/overrides/server.d/presenter.conf:ro
+
+  penpot-presenter:
+    image: penpot-presenter:2.18.5
+    pull_policy: never
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - penpot
+
+networks:
+  penpot: {}
