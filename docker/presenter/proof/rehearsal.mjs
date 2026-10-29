@@ -478,6 +478,21 @@ async function main() {
     await presenter.screenshot({ path: `${outDir}/presenter-slide-1.png` });
     note("screenshot presenter first slide");
 
+    const beforeCount = await presenter.locator("#count").innerText();
+    const beforeTimer = await presenter.locator("#timer").innerText();
+    await presenter.getByRole("button", { name: "Reset timer" }).focus();
+    await presenter.keyboard.press("Space");
+    await presenter.waitForFunction((previous) => {
+        const count = document.querySelector("#count")?.textContent || "";
+        return count && count !== previous;
+    }, beforeCount, { timeout: 120000 });
+    const afterTimer = await presenter.locator("#timer").innerText();
+    if (beforeTimer !== "00:00" && afterTimer === "00:00") {
+        throw new Error("Space activated the focused button");
+    }
+    await presenter.screenshot({ path: `${outDir}/presenter-space.png` });
+    note(`Space moved the deck (${beforeCount} -> ${await presenter.locator("#count").innerText()})`);
+
     const audiencePromise = presenter.waitForEvent("popup");
     await presenter.getByRole("button", { name: "Open audience window" }).click();
     const audience = await audiencePromise;
@@ -513,6 +528,29 @@ async function main() {
     await audience.waitForFunction(() => document.querySelector("img.audience-slide")?.alt?.includes("Slide 2"), { timeout: 30000 });
     await presenter.screenshot({ path: `${outDir}/presenter-font.png` });
     note("screenshots of the figure and the custom-font slide; audience stays in sync");
+
+    const marked = sql(
+        "UPDATE storage_object SET deleted_at = now() " +
+        "WHERE deleted_at IS NULL AND metadata::text LIKE '%tempfile%' " +
+        "RETURNING id::text"
+    );
+    const markedIds = marked.split("\n").map((line) => line.trim()).filter(Boolean);
+    note(`marked ${markedIds.length} tempfile rows deleted_at`);
+    if (!markedIds.length) {
+        throw new Error("no tempfile storage rows to mark");
+    }
+    const asset = await fetch(`${base}/assets/by-id/${markedIds[0]}`, { headers: { cookie } });
+    note(`asset after deleted_at: HTTP ${asset.status}`);
+    if (asset.status !== 404) {
+        throw new Error(`expected 404 after deleted_at, got ${asset.status}`);
+    }
+    const stillThere = await audience.locator("img.audience-slide").evaluate((image) => image.naturalWidth > 100);
+    if (!stillThere) {
+        throw new Error("audience lost the slide after storage gc");
+    }
+    await audience.screenshot({ path: `${outDir}/audience-after-gc.png` });
+    const left = sql("SELECT count(*) FROM storage_object WHERE deleted_at IS NOT NULL");
+    note(`deleted_at rows still present: ${left}`);
 
     const viewer = await context.newPage();
     await viewer.goto(`${base}/#/view?file-id=${fileId}&page-id=${pageId}&index=0`, { waitUntil: "domcontentloaded" });

@@ -1,8 +1,9 @@
-import { applyDelta, CHANNEL_NAME, helloMessage, navMessage, stateMessage } from "./lib/channel.mjs";
-import { exportRequest } from "./lib/export-request.mjs";
-import { keyDelta, keyFromEditable } from "./lib/keys.mjs";
+import { CHANNEL_NAME, clampIndex, edgeMessage, helloMessage, navMessage, stateMessage } from "./lib/channel.mjs";
+import { exportRequest, wasmExportEnabled } from "./lib/export-request.mjs";
+import { keyCommand, keyFromEditable } from "./lib/keys.mjs";
 import { renderNotes } from "./lib/markdown.mjs";
 import { readNotes } from "./lib/notes.mjs";
+import { RELOAD_MESSAGE, sessionExpired } from "./lib/session.mjs";
 import { pageList, slidesFromObjects } from "./lib/slides.mjs";
 import { decode } from "./lib/transit.mjs";
 
@@ -20,9 +21,16 @@ const deck = {
     slides: [],
     index: 0,
     urls: new Map(),
+    blobs: new Map(),
+    errors: new Map(),
+    flagsText: "",
+    wasm: false,
     startedAt: 0,
     generation: 0,
 };
+
+const inflight = new Map();
+let audienceUrl = "";
 
 function el(tag, attrs, children) {
     const node = document.createElement(tag);
@@ -63,9 +71,14 @@ async function rpc(method, body) {
     const response = await fetch(url, {
         method: isGet ? "GET" : "POST",
         credentials: "include",
+        redirect: "manual",
         headers,
         body: payload,
     });
+    if (sessionExpired(response)) {
+        const error = new Error("reload");
+        throw error;
+    }
     const text = await response.text();
     let data = null;
     if (text) {
@@ -90,11 +103,14 @@ async function rpc(method, body) {
 }
 
 function signInView(message) {
+    const reload = message === "reload" || message === RELOAD_MESSAGE;
     app.replaceChildren(
         el("main", { class: "gate" }, [
             el("h1", {}, ["Penpot Presenter"]),
-            el("p", {}, [message || "Sign in to Penpot, then come back to this page."]),
-            el("a", { href: "/#/auth/login" }, ["Sign in"]),
+            el("p", {}, [reload ? RELOAD_MESSAGE : (message || "Sign in to Penpot, then come back to this page.")]),
+            reload
+                ? el("button", { type: "button", onClick: () => location.reload() }, ["Reload"])
+                : el("a", { href: "/#/auth/login" }, ["Sign in"]),
         ])
     );
 }
@@ -117,6 +133,18 @@ function slideUrl(slide) {
     return deck.urls.get(`${slide.id}:${deck.revn}`) || "";
 }
 
+function slideKey(slide) {
+    return slide ? `${slide.id}:${deck.revn}` : "";
+}
+
+function slideBlob(slide) {
+    return deck.blobs.get(slideKey(slide)) || null;
+}
+
+function slideProblem(slide) {
+    return slide ? deck.errors.get(String(slide.id)) || "" : "";
+}
+
 function publish() {
     const slide = currentSlide();
     channel.postMessage(
@@ -125,8 +153,8 @@ function publish() {
             pageId: deck.pageId,
             index: deck.index,
             total: deck.slides.length,
-            src: slideUrl(slide),
             name: slide ? slide.name : "",
+            blob: slideBlob(slide),
         })
     );
 }
@@ -142,22 +170,20 @@ function rememberQuery() {
     history.replaceState(null, "", url);
 }
 
-async function exportSlide(slide) {
-    const key = `${slide.id}:${deck.revn}`;
-    if (deck.urls.has(key)) {
-        return deck.urls.get(key);
-    }
+async function fetchExport(slide, key) {
     const body = exportRequest({
         profileId: deck.profileId,
         fileId: deck.fileId,
         pageId: deck.pageId,
         objectId: slide.id,
         name: slide.name || "slide",
-        scale: 2,
+        scale: 1.5,
+        wasm: deck.wasm,
     });
     const response = await fetch(new URL("/api/export", location.origin), {
         method: "POST",
         credentials: "include",
+        redirect: "manual",
         headers: {
             "content-type": "application/transit+json",
             accept: "application/transit+json",
@@ -165,6 +191,10 @@ async function exportSlide(slide) {
         },
         body: JSON.stringify(body),
     });
+    if (sessionExpired(response)) {
+        const error = new Error("reload");
+        throw error;
+    }
     const text = await response.text();
     let data;
     try {
@@ -176,10 +206,36 @@ async function exportSlide(slide) {
         const hint = (data && (data.hint || data.message)) || `export failed (${response.status})`;
         throw new Error(String(hint));
     }
-    const uri = String(data.uri);
-    const absolute = new URL(uri, location.origin).href;
-    deck.urls.set(key, absolute);
-    return absolute;
+    const asset = await fetch(new URL(String(data.uri), location.origin), {
+        credentials: "include",
+        redirect: "manual",
+    });
+    if (sessionExpired(asset)) {
+        throw new Error("reload");
+    }
+    if (!asset.ok) {
+        throw new Error(`slide image failed (${asset.status})`);
+    }
+    const blob = await asset.blob();
+    deck.blobs.set(key, blob);
+    deck.urls.set(key, URL.createObjectURL(blob));
+    deck.errors.delete(String(slide.id));
+    return blob;
+}
+
+async function exportSlide(slide) {
+    const key = slideKey(slide);
+    if (deck.blobs.has(key)) {
+        return deck.blobs.get(key);
+    }
+    if (inflight.has(key)) {
+        return inflight.get(key);
+    }
+    const job = fetchExport(slide, key).finally(() => {
+        inflight.delete(key);
+    });
+    inflight.set(key, job);
+    return job;
 }
 
 async function prefetch(start) {
@@ -203,7 +259,11 @@ async function prefetch(start) {
         try {
             await exportSlide(deck.slides[index]);
         } catch (error) {
-            deck.exportError = error.message;
+            if (error.message === "reload") {
+                signInView("reload");
+                return;
+            }
+            deck.errors.set(String(deck.slides[index].id), error.message);
         }
         if (generation === deck.generation && (index === deck.index || index === deck.index + 1)) {
             drawPresenter();
@@ -212,24 +272,34 @@ async function prefetch(start) {
     }
 }
 
-function go(delta) {
-    const next = applyDelta(deck.index, delta, deck.slides.length);
+function goTo(index) {
+    const next = clampIndex(index, deck.slides.length);
     if (next === deck.index) {
         return;
     }
     deck.index = next;
-    deck.exportError = "";
     drawPresenter();
     publish();
     prefetch(deck.index);
 }
 
+function go(delta) {
+    goTo(deck.index + delta);
+}
+
 function drawAudience(state) {
-    const src = state && state.src;
+    let src = "";
+    if (state && state.blob) {
+        if (audienceUrl) {
+            URL.revokeObjectURL(audienceUrl);
+        }
+        audienceUrl = URL.createObjectURL(state.blob);
+        src = audienceUrl;
+    }
     app.replaceChildren(
         el("main", { class: "audience", tabindex: "0" }, [
             src
-                ? el("img", { class: "audience-slide", src, alt: state.name || "Slide" }, [])
+                ? el("img", { class: "audience-slide", src, alt: (state && state.name) || "Slide" }, [])
                 : el("p", { class: "waiting" }, ["Waiting for the presenter"]),
         ])
     );
@@ -300,8 +370,8 @@ function drawPresenter() {
     if (shell) {
         document.getElementById("count").textContent = count;
         document.getElementById("slide-title").textContent = title;
-        fillStage(document.getElementById("stage"), src, title, deck.exportError || "Rendering the slide…");
-        fillNext(document.getElementById("next"), nextSrc, next ? next.name || "Next slide" : "", next ? "Rendering…" : "End");
+        fillStage(document.getElementById("stage"), src, title, slideProblem(slide) || "Rendering the slide…");
+        fillNext(document.getElementById("next"), nextSrc, next ? next.name || "Next slide" : "", slideProblem(next) || (next ? "Rendering…" : "End"));
         const notes = document.getElementById("notes");
         if (notes.dataset.slide !== String(deck.index)) {
             notes.dataset.slide = String(deck.index);
@@ -313,8 +383,8 @@ function drawPresenter() {
     const stage = el("section", { class: "stage", id: "stage", tabindex: "0" }, []);
     const nextBox = el("figure", { class: "next", id: "next" }, [el("figcaption", {}, ["Next"])]);
     const notes = el("div", { class: "notes-body", id: "notes" }, []);
-    fillStage(stage, src, title, deck.exportError || "Rendering the slide…");
-    fillNext(nextBox, nextSrc, next ? next.name || "Next slide" : "", next ? "Rendering…" : "End");
+    fillStage(stage, src, title, slideProblem(slide) || "Rendering the slide…");
+    fillNext(nextBox, nextSrc, next ? next.name || "Next slide" : "", slideProblem(next) || (next ? "Rendering…" : "End"));
     notes.dataset.slide = String(deck.index);
     fillNotes(notes, slide);
 
@@ -335,7 +405,7 @@ function drawPresenter() {
                         el("h2", { id: "slide-title" }, [title]),
                         notes,
                     ]),
-                    el("p", { class: "hint" }, ["Keys: → ← space PageDown PageUp"]),
+                    el("p", { class: "hint" }, ["Keys: → ← space PageDown PageUp Home End"]),
                 ]),
             ]),
         ])
@@ -384,7 +454,8 @@ function pageObjects(pages, pageId) {
 }
 
 async function present(fileId, pageId) {
-    const { pages } = await loadFile(fileId);
+    const loaded = await loadFile(fileId);
+    const pages = loaded.pages;
     const page = pageObjects(pages, pageId);
     if (!page || !page.objects) {
         throw new Error("This page has no shapes yet.");
@@ -392,8 +463,14 @@ async function present(fileId, pageId) {
     deck.pageId = page.id;
     deck.slides = slidesFromObjects(page.objects);
     deck.index = 0;
+    for (const url of deck.urls.values()) {
+        URL.revokeObjectURL(url);
+    }
     deck.urls = new Map();
-    deck.exportError = "";
+    deck.blobs = new Map();
+    deck.errors = new Map();
+    inflight.clear();
+    deck.wasm = wasmExportEnabled(deck.flagsText, loaded.file.features);
     deck.startedAt = performance.now();
     rememberQuery();
     drawPresenter();
@@ -436,7 +513,7 @@ function picker(files, pages, errorText) {
     app.replaceChildren(
         el("main", { class: "gate" }, [
             el("h1", {}, ["Penpot Presenter"]),
-            el("p", {}, ["Pick a file and a page. Slides are the top-level boards, in board order."]),
+            el("p", {}, ["Pick a file and a page. Slides follow the Penpot viewer, including nested boards shown in view mode."]),
             el("label", {}, ["File", fileSelect]),
             el("label", {}, ["Page", pageSelect]),
             errorText ? el("p", { class: "error" }, [errorText]) : null,
@@ -490,17 +567,24 @@ function onKey(event) {
     if (keyFromEditable(event.target)) {
         return;
     }
-    const delta = keyDelta(event);
-    if (!delta) {
+    const command = keyCommand(event);
+    if (!command) {
         return;
     }
     event.preventDefault();
     if (role === "audience") {
-        channel.postMessage(navMessage(delta));
+        channel.postMessage(command.edge ? edgeMessage(command.edge) : navMessage(command.delta));
         return;
     }
-    if (deck.slides.length) {
-        go(delta);
+    if (!deck.slides.length) {
+        return;
+    }
+    if (command.edge === "start") {
+        goTo(0);
+    } else if (command.edge === "end") {
+        goTo(deck.slides.length - 1);
+    } else {
+        go(command.delta);
     }
 }
 
@@ -512,6 +596,10 @@ channel.onmessage = (event) => {
     }
     if (role === "presenter" && message.type === "hello") {
         publish();
+        return;
+    }
+    if (role === "presenter" && message.type === "edge" && deck.slides.length) {
+        goTo(message.edge === "end" ? deck.slides.length - 1 : 0);
         return;
     }
     if (role === "presenter" && message.type === "nav" && deck.slides.length) {
@@ -529,6 +617,7 @@ async function main() {
         return;
     }
     try {
+        await loadFlags();
         const files = await listFiles();
         if (!files.length) {
             signInView("No files are visible for this account.");
@@ -550,12 +639,29 @@ async function main() {
         }
         picker(files, pages, "");
     } catch (error) {
+        if (error.message === "reload") {
+            signInView("reload");
+            return;
+        }
         if (error.message === "sign-in") {
             signInView();
             return;
         }
         signInView(error.message);
     }
+}
+
+async function loadFlags() {
+    const response = await fetch(new URL("/js/config.js", location.origin), {
+        credentials: "include",
+        redirect: "manual",
+    });
+    if (sessionExpired(response)) {
+        throw new Error("reload");
+    }
+    const text = await response.text();
+    const match = text.match(/var penpotFlags = "([^"]*)"/);
+    deck.flagsText = match ? match[1] : "";
 }
 
 main();

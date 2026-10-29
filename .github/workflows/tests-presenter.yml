@@ -1,0 +1,35 @@
+name: "CI: Presenter"
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - ready_for_review
+    paths:
+      - "docker/presenter/**"
+      - ".github/workflows/tests-presenter.yml"
+
+  push:
+    branches:
+      - develop
+      - staging
+      - main
+    paths:
+      - "docker/presenter/**"
+      - ".github/workflows/tests-presenter.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test-presenter:
+    name: "Test presenter"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run node tests
+        working-directory: docker/presenter
+        run: node --test test/presenter.test.mjs

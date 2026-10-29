@@ -1,0 +1,6 @@
+# Rollback only. The tag is created before the rollout from the image
+# that is running. It is not pulled.
+services:
+  penpot-frontend:
+    image: penpotapp-running/frontend:2.18.5
+    pull_policy: never

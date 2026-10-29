@@ -1,17 +1,25 @@
-# Presenter sidecar. Use it as a second compose file on an existing
-# Penpot 2.18.5 project. It does not replace penpot-frontend,
-# penpot-backend, penpot-exporter, or penpot-mcp.
+# Presenter sidecar. Third compose file on a Penpot 2.18.5 project.
+# It does not replace penpot-frontend, penpot-backend, penpot-exporter,
+# or penpot-mcp.
 #
-#   export PENPOT_PRESENTER_DIR=$PWD/docker/presenter
-#   docker build -t penpot-presenter:2.18.5 docker/presenter
-#   docker compose -p penpot --pull never \
+# Copy this directory to ~/penpot/presenter (see ROLLOUT.md). Every
+# live `up` passes three files, in this order:
+#   ~/penpot/docker-compose.yaml
+#   ~/penpot/mcp-headless/docker-compose.yaml
+#   ~/penpot/presenter/docker-compose.yaml
+#
+#   export PENPOT_PRESENTER_DIR=$HOME/penpot/presenter
+#   docker build -t penpot-presenter:2.18.5 "$PENPOT_PRESENTER_DIR"
+#   docker compose -p penpot \
 #     -f ~/penpot/docker-compose.yaml \
-#     -f docker/presenter/docker-compose.yaml \
-#     up -d penpot-presenter
-#   docker compose -p penpot --pull never \
+#     -f ~/penpot/mcp-headless/docker-compose.yaml \
+#     -f ~/penpot/presenter/docker-compose.yaml \
+#     up -d --pull never penpot-presenter
+#   docker compose -p penpot \
 #     -f ~/penpot/docker-compose.yaml \
-#     -f docker/presenter/docker-compose.yaml \
-#     up -d --no-deps --force-recreate penpot-frontend
+#     -f ~/penpot/mcp-headless/docker-compose.yaml \
+#     -f ~/penpot/presenter/docker-compose.yaml \
+#     up -d --pull never --no-deps --force-recreate penpot-frontend
 #
 # The page is only at /presenter/ on the Penpot origin. Port 8080 stays
 # on the compose network. It is not published on the host.

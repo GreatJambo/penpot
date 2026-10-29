@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { applyDelta, clampIndex, navMessage, stateMessage } from "../public/lib/channel.mjs";
-import { exportRequest } from "../public/lib/export-request.mjs";
-import { keyDelta, keyFromEditable } from "../public/lib/keys.mjs";
+import { exportRequest, wasmExportEnabled } from "../public/lib/export-request.mjs";
+import { applyKey, keyCommand, keyFromEditable } from "../public/lib/keys.mjs";
+import { RELOAD_MESSAGE, sessionExpired } from "../public/lib/session.mjs";
 import { renderNotes } from "../public/lib/markdown.mjs";
 import { readNotes } from "../public/lib/notes.mjs";
 import { ROOT_ID, slidesFromObjects } from "../public/lib/slides.mjs";
@@ -24,18 +25,19 @@ function board(id, name, extra = {}) {
     };
 }
 
-test("slides follow viewer order and skip nested or hidden boards", () => {
+test("slides follow viewer order and keep nested boards shown in view mode", () => {
     const objects = {
         [ZERO]: { id: ZERO, type: "frame", shapes: ["b", "rect", "a", "hidden", "viewer-off"] },
         b: board("b", "First"),
-        a: board("a", "Second", { shapes: ["nested"] }),
-        nested: board("nested", "Nested", { frameId: "a" }),
+        a: board("a", "Second", { shapes: ["nested", "shown"] }),
+        nested: board("nested", "Nested", { frameId: "a", hideInViewer: true }),
+        shown: board("shown", "Shown inside", { frameId: "a", hideInViewer: false }),
         rect: { id: "rect", type: "rect", name: "Not a board", frameId: ZERO },
         hidden: board("hidden", "Hidden", { hidden: true }),
         "viewer-off": board("viewer-off", "Off", { hideInViewer: true }),
     };
     const slides = slidesFromObjects(objects);
-    assert.deepEqual(slides.map((slide) => slide.name), ["Second", "First"]);
+    assert.deepEqual(slides.map((slide) => slide.name), ["Hidden", "Second", "Shown inside", "First"]);
 });
 
 test("notes are read from the shared presenter plugin data", () => {
@@ -50,20 +52,42 @@ test("notes are read from the shared presenter plugin data", () => {
 });
 
 test("clicker keys move one slide and ignore typing", () => {
-    assert.equal(keyDelta({ key: "ArrowRight" }), 1);
-    assert.equal(keyDelta({ key: "Space" }), 1);
-    assert.equal(keyDelta({ key: "PageDown" }), 1);
-    assert.equal(keyDelta({ key: "ArrowLeft" }), -1);
-    assert.equal(keyDelta({ key: "PageUp" }), -1);
-    assert.equal(keyDelta({ key: "KeyA" }), 0);
+    assert.equal(keyCommand({ key: "ArrowRight" }).delta, 1);
+    assert.equal(keyCommand({ key: " ", code: "Space" }).delta, 1);
+    assert.equal(keyCommand({ key: "Unidentified", code: "Space" }).delta, 1);
+    assert.equal(keyCommand({ key: "PageDown" }).delta, 1);
+    assert.equal(keyCommand({ key: "ArrowLeft" }).delta, -1);
+    assert.equal(keyCommand({ key: "PageUp" }).delta, -1);
+    assert.equal(keyCommand({ key: "Home" }).edge, "start");
+    assert.equal(keyCommand({ key: "End" }).edge, "end");
+    assert.equal(keyCommand({ key: "a", code: "KeyA" }), null);
     assert.equal(keyFromEditable({ tagName: "TEXTAREA" }), true);
-    assert.equal(keyFromEditable({ tagName: "DIV" }), false);
+    assert.equal(keyFromEditable({ tagName: "BUTTON" }), false);
+    const prevented = [];
+    const landed = applyKey({
+        key: " ",
+        code: "Space",
+        target: { tagName: "BUTTON" },
+        preventDefault() { prevented.push(true); },
+    }, 0, 4);
+    assert.equal(landed, 1);
+    assert.deepEqual(prevented, [true]);
+    assert.equal(applyKey({ key: "Home", preventDefault() {} }, 2, 4), 0);
+    assert.equal(applyKey({ key: "End", preventDefault() {} }, 0, 4), 3);
+    assert.equal(applyKey({ key: " ", target: { tagName: "INPUT" }, preventDefault() {} }, 0, 4), null);
     assert.equal(clampIndex(-3, 4), 0);
     assert.equal(applyDelta(0, -1, 4), 0);
     assert.equal(applyDelta(3, 1, 4), 3);
     assert.equal(applyDelta(1, 1, 4), 2);
     assert.equal(navMessage(1).type, "nav");
-    assert.equal(stateMessage({ fileId: "f", pageId: "p", index: 1, total: 4, src: "/a", name: "S" }).index, 1);
+    assert.equal(stateMessage({ fileId: "f", pageId: "p", index: 1, total: 4, name: "S" }).index, 1);
+});
+
+test("an access redirect asks for a reload", () => {
+    assert.equal(sessionExpired({ type: "opaqueredirect", status: 0 }), true);
+    assert.equal(sessionExpired({ status: 302 }), true);
+    assert.equal(sessionExpired({ status: 200, redirected: false }), false);
+    assert.equal(RELOAD_MESSAGE.includes("Reload"), true);
 });
 
 test("notes markdown escapes html before markup", () => {
@@ -81,15 +105,27 @@ test("export body is transit the exporter can read", () => {
         pageId: "33333333-3333-3333-3333-333333333333",
         objectId: "44444444-4444-4444-4444-444444444444",
         name: "Slide 1",
-        scale: 2,
     });
     const decoded = decode(body);
     assert.equal(decoded.cmd.name, "export-shapes");
     assert.equal(decoded.wait, true);
-    assert.equal(decoded["is-wasm"], true);
+    assert.equal(decoded["is-wasm"], undefined);
+    assert.equal(decoded.exports[0].scale, 1.5);
+    assert.equal(wasmExportEnabled("", ["render-wasm/v1"]), false);
+    assert.equal(wasmExportEnabled("enable-wasm-export", ["render-wasm/v1"]), true);
+    assert.equal(wasmExportEnabled("enable-wasm-export disable-wasm-export", ["render-wasm/v1"]), false);
+    assert.equal(wasmExportEnabled("enable-wasm-export", []), false);
+    const wasmBody = decode(exportRequest({
+        profileId: "11111111-1111-1111-1111-111111111111",
+        fileId: "22222222-2222-2222-2222-222222222222",
+        pageId: "33333333-3333-3333-3333-333333333333",
+        objectId: "44444444-4444-4444-4444-444444444444",
+        name: "Slide 1",
+        wasm: true,
+    }));
+    assert.equal(wasmBody["is-wasm"], true);
     assert.equal(decoded["profile-id"].value, "11111111-1111-1111-1111-111111111111");
     assert.equal(decoded.exports[0].type.name, "png");
-    assert.equal(decoded.exports[0].scale, 2);
     assert.equal(decoded.exports[0]["object-id"].value, "44444444-4444-4444-4444-444444444444");
     assert.equal(decoded.exports[0].name, "Slide 1");
 });

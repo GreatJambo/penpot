@@ -2,7 +2,7 @@
 
 export const CHANNEL_NAME = "penpot-presenter-v1";
 
-export function stateMessage({ fileId, pageId, index, total, src, name }) {
+export function stateMessage({ fileId, pageId, index, total, name, blob }) {
     return {
         v: 1,
         type: "state",
@@ -10,9 +10,13 @@ export function stateMessage({ fileId, pageId, index, total, src, name }) {
         pageId,
         index,
         total,
-        src: src || "",
         name: name || "",
+        blob: blob || null,
     };
+}
+
+export function edgeMessage(edge) {
+    return { v: 1, type: "edge", edge };
 }
 
 export function navMessage(delta) {

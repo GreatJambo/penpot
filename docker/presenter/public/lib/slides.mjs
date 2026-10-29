@@ -1,11 +1,12 @@
 /**
- * Top-level boards of a Penpot page, in board order.
+ * Boards in Penpot viewer order.
  *
- * Board order matches the Penpot viewer. The root child list is back
- * to front, and the viewer starts at the front, so this list is reversed.
- * The top of the layer stack is slide 1.
- * Nested frames are not slides. Hidden boards and boards marked
- * hide-in-viewer are not slides.
+ * This follows get-viewer-frames: every frame except the page root,
+ * dropping only shapes with hide-in-viewer. Nested boards are included
+ * when show-in-view-mode is on, which clears hide-in-viewer. A hidden
+ * layer stays in the list, matching the viewer. Sibling order is the
+ * reverse of the parent's child list (front of the stack first), and a
+ * board is visited before the boards inside it.
  */
 
 export const ROOT_ID = "00000000-0000-0000-0000-000000000000";
@@ -20,7 +21,7 @@ function field(shape, camel, kebab) {
     return shape[kebab];
 }
 
-export function isTopLevelBoard(shape) {
+export function isViewerFrame(shape) {
     if (!shape || typeof shape !== "object") {
         return false;
     }
@@ -32,38 +33,41 @@ export function isTopLevelBoard(shape) {
     if (!id || id === ROOT_ID) {
         return false;
     }
-    const frameId = String(field(shape, "frameId", "frame-id") || "");
-    if (frameId !== ROOT_ID) {
-        return false;
+    return field(shape, "hideInViewer", "hide-in-viewer") !== true;
+}
+
+function childIds(shape) {
+    return shape && Array.isArray(shape.shapes) ? shape.shapes : [];
+}
+
+function walk(objects, id, slides) {
+    const shape = objects[String(id)];
+    if (!shape) {
+        return;
     }
-    if (shape.hidden === true) {
-        return false;
+    const ids = childIds(shape);
+    for (let index = ids.length - 1; index >= 0; index -= 1) {
+        const child = objects[String(ids[index])];
+        if (!child) {
+            continue;
+        }
+        if (isViewerFrame(child)) {
+            slides.push(child);
+        }
+        walk(objects, child.id, slides);
     }
-    const hideInViewer = field(shape, "hideInViewer", "hide-in-viewer");
-    if (hideInViewer === true) {
-        return false;
-    }
-    return true;
 }
 
 /**
  * @param {Record<string, object>} objects page objects map from get-file JSON
- * @returns {object[]} slides in board order
+ * @returns {object[]} slides in viewer order
  */
 export function slidesFromObjects(objects) {
     if (!objects || typeof objects !== "object") {
         return [];
     }
-    const root = objects[ROOT_ID];
-    const childIds = root && Array.isArray(root.shapes) ? root.shapes : [];
     const slides = [];
-    for (const id of childIds) {
-        const shape = objects[String(id)];
-        if (isTopLevelBoard(shape)) {
-            slides.push(shape);
-        }
-    }
-    slides.reverse();
+    walk(objects, ROOT_ID, slides);
     return slides;
 }
 
