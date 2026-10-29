@@ -2,12 +2,38 @@
  * Tiny Streamable HTTP MCP server for file navigation.
  *
  * It is not the Penpot design MCP. It only lists files and points the
- * headless browser at one of them. Bind it on the Docker network and on
- * 127.0.0.1. Do not publish it through Cloudflare.
+ * headless browser at one of them. It listens on the compose network.
+ * The frontend nginx publishes it at /mcp-nav/stream. Callers pass the
+ * same userToken query parameter as /mcp/stream. This server accepts
+ * only the token of the headless session's profile.
  */
 
 import http from "node:http";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+
+const expectedToken = process.env.PENPOT_MCP_USER_TOKEN || "";
+const expectedDigest = createHash("sha256").update(expectedToken, "utf8").digest();
+
+if (!expectedToken) {
+    console.error("PENPOT_MCP_USER_TOKEN is unset; nav MCP rejects every call");
+}
+
+/**
+ * True only when the presented token is the configured one.
+ *
+ * Both sides are hashed to a fixed length first so the compare does not
+ * leak the length and does not throw when the lengths differ.
+ *
+ * @param {string | null} presented
+ * @returns {boolean}
+ */
+function tokenAccepted(presented) {
+    if (!expectedToken) {
+        return false;
+    }
+    const digest = createHash("sha256").update(String(presented ?? ""), "utf8").digest();
+    return timingSafeEqual(digest, expectedDigest);
+}
 
 const tools = [
     {
@@ -148,7 +174,15 @@ export function startNavServer(port, api) {
             send(res, 200, null, { ok: true });
             return;
         }
-        if (req.method !== "POST" || (url.pathname !== "/mcp" && url.pathname !== "/mcp-nav/stream")) {
+        if (url.pathname !== "/mcp" && url.pathname !== "/mcp-nav/stream") {
+            send(res, 404, null, { error: "not found" });
+            return;
+        }
+        if (!tokenAccepted(url.searchParams.get("userToken"))) {
+            send(res, 401, null, { error: "unauthorized" });
+            return;
+        }
+        if (req.method !== "POST") {
             send(res, 404, null, { error: "not found" });
             return;
         }

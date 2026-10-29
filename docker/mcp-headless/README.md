@@ -12,13 +12,17 @@ It signs in and sits on the dashboard until an agent opens a file.
 Design tools (`execute_code`, `export_shape`, and the rest) stay on the
 Penpot MCP server, at the existing `/mcp/stream` path.
 
-File choice is a second, small MCP server in this container:
+File choice is a second MCP server, published by the frontend nginx
+at `/mcp-nav/stream` on the same host as `/mcp/stream`. On the live
+site that path stays behind the existing Cloudflare Access. The nav
+server checks `userToken` and accepts only the token of the account
+the sidecar logged in as. A missing or other token gets 401. The token
+is not logged.
 
-- Compose network: `http://penpot-mcp-headless:4410/mcp`
-- This machine only: `http://127.0.0.1:4410/mcp`
+Port 4410 is only inside the compose network, for that nginx proxy.
+It is not published on the host.
 
-Port 4410 is published on `127.0.0.1`. Do not add it to Cloudflare.
-Agents on this machine call it directly. Tools:
+Tools:
 
 - `list_files` lists teams, projects, and files for the logged-in session.
 - `open_file` opens one file and waits until the plugin reconnects.
@@ -45,25 +49,29 @@ Copy `env.example` outside this repo and `chmod 600` it. The password
 goes only in that file.
 
 ```shell
-export PENPOT_MCP_HEADLESS_ENV_FILE=/path/to/secret.env
+export PENPOT_MCP_HEADLESS_ENV_FILE=$HOME/.config/penpot-mcp-headless.env
 export PENPOT_MCP_HEADLESS_DIR="$PWD/docker/mcp-headless"
 docker build -t penpot-mcp-headless:2.18.5 docker/mcp-headless
-docker compose -p penpot \
+docker compose -p penpot --pull never \
   -f /path/to/penpot/docker-compose.yaml \
   -f docker/mcp-headless/docker-compose.yaml \
   up -d penpot-mcp-headless
+docker compose -p penpot --pull never \
+  -f /path/to/penpot/docker-compose.yaml \
+  -f docker/mcp-headless/docker-compose.yaml \
+  up -d --no-deps --force-recreate penpot-frontend
 ```
 
-Set `PENPOT_PUBLIC_URI` to the origin the editor is configured with.
-Set `PENPOT_INTERNAL_ORIGIN` to `http://penpot-frontend:8080` when that
-origin is the public site. Chromium then resolves the public host to
-`127.0.0.1`, and a proxy inside this container forwards HTTP and
-WebSockets (`/mcp/ws`, `/ws/notifications`) to the frontend. Other host
-names do not resolve. Cloudflare is not on that path.
+The second command restarts only the frontend, so nginx loads the
+mounted `/mcp-nav/stream` snippet. See `ROLLOUT.md` for the live steps
+and the rollback.
 
-`CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` are only for the
-case where the browser must open the public site itself. Leave them
-unset when internal routing is on.
+Set `PENPOT_PUBLIC_URI` to the origin the editor is configured with.
+Set `PENPOT_INTERNAL_ORIGIN` to `http://penpot-frontend:8080`. Chromium
+resolves the public host to `127.0.0.1`, and a proxy inside this
+container forwards HTTP and WebSockets (`/mcp/ws`, `/ws/notifications`)
+to the frontend. Other host names do not resolve. The sidecar does not
+use a Cloudflare Access service token.
 
 ## Check
 

@@ -3,21 +3,30 @@
 # Use it as a second compose file on an existing Penpot project.
 # It does not replace or rebuild penpot-frontend, penpot-backend, or penpot-mcp.
 #
-#   export PENPOT_MCP_HEADLESS_ENV_FILE=/path/to/secret.env
-#   export PENPOT_MCP_HEADLESS_SCRIPT=$PWD/docker/mcp-headless/keep-open.mjs
-#   docker compose -p penpot \
+#   export PENPOT_MCP_HEADLESS_ENV_FILE=$HOME/.config/penpot-mcp-headless.env
+#   export PENPOT_MCP_HEADLESS_DIR=$PWD/docker/mcp-headless
+#   docker compose -p penpot --pull never \
 #     -f ~/penpot/docker-compose.yaml \
 #     -f docker/mcp-headless/docker-compose.yaml \
 #     up -d penpot-mcp-headless
+#   docker compose -p penpot --pull never \
+#     -f ~/penpot/docker-compose.yaml \
+#     -f docker/mcp-headless/docker-compose.yaml \
+#     up -d --no-deps --force-recreate penpot-frontend
 #
 # secret.env (chmod 600, never commit) must define:
-#   PENPOT_PUBLIC_URI, PENPOT_EMAIL, PENPOT_PASSWORD
-# Optional: PENPOT_INTERNAL_ORIGIN, CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET
+#   PENPOT_PUBLIC_URI, PENPOT_INTERNAL_ORIGIN, PENPOT_EMAIL,
+#   PENPOT_PASSWORD, PENPOT_MCP_USER_TOKEN
 #
-# The nav MCP listens on port 4410 inside the compose network and is
-# published only on 127.0.0.1. Do not put it on the public hostname.
+# Nav MCP is reached only through the frontend at /mcp-nav/stream.
+# Port 4410 stays on the compose network so nginx can proxy to it.
+# It is not published on the host, so it does not skip Cloudflare Access.
 
 services:
+  penpot-frontend:
+    volumes:
+      - ${PENPOT_MCP_HEADLESS_DIR:?set PENPOT_MCP_HEADLESS_DIR}/nginx-mcp-nav.conf:/etc/nginx/overrides/server.d/mcp-nav.conf:ro
+
   penpot-mcp-headless:
     build:
       context: .
@@ -30,8 +39,6 @@ services:
     shm_size: "1gb"
     env_file:
       - ${PENPOT_MCP_HEADLESS_ENV_FILE:?set PENPOT_MCP_HEADLESS_ENV_FILE to a chmod 600 file}
-    ports:
-      - "127.0.0.1:4410:4410"
     environment:
       LIBGL_ALWAYS_SOFTWARE: "1"
       ARTIFACT_DIR: /opt/penpot-mcp-headless/artifacts
