@@ -1,0 +1,81 @@
+# Headless Chromium sidecar for the Penpot MCP plugin.
+#
+# Use it as a second compose file on an existing Penpot project.
+# It does not replace or rebuild penpot-frontend, penpot-backend, or penpot-mcp.
+#
+#   export PENPOT_MCP_HEADLESS_ENV_FILE=$HOME/.config/penpot-mcp-headless.env
+#   export PENPOT_MCP_HEADLESS_DIR=$PWD/docker/mcp-headless
+#   docker compose -p penpot --pull never \
+#     -f ~/penpot/docker-compose.yaml \
+#     -f docker/mcp-headless/docker-compose.yaml \
+#     up -d penpot-mcp-headless
+#   docker compose -p penpot --pull never \
+#     -f ~/penpot/docker-compose.yaml \
+#     -f docker/mcp-headless/docker-compose.yaml \
+#     up -d --no-deps --force-recreate penpot-frontend
+#
+# Secret file, never commit. The sidecar runs as uid 1001:
+#   sudo chown 1001:1001 ~/.config/penpot-mcp-headless.env
+#   chmod 400 ~/.config/penpot-mcp-headless.env
+# It must define:
+#   PENPOT_PUBLIC_URI, PENPOT_INTERNAL_ORIGIN, PENPOT_EMAIL,
+#   PENPOT_PASSWORD, PENPOT_MCP_USER_TOKEN
+#
+# Nav MCP is reached only through the frontend at /mcp-nav/stream.
+# Port 4410 stays on the compose network so nginx can proxy to it.
+# It is not published on the host, so it does not skip Cloudflare Access.
+
+services:
+  penpot-frontend:
+    volumes:
+      - ${PENPOT_MCP_HEADLESS_DIR:?set PENPOT_MCP_HEADLESS_DIR}/nginx-mcp-nav.conf:/etc/nginx/overrides/server.d/mcp-nav.conf:ro
+
+  penpot-mcp-headless:
+    build:
+      context: ${PENPOT_MCP_HEADLESS_DIR:?set PENPOT_MCP_HEADLESS_DIR}
+      dockerfile: Dockerfile
+    image: penpot-mcp-headless:2.18.5
+    pull_policy: never
+    restart: unless-stopped
+    init: true
+    shm_size: "1gb"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4410/health').then((r)=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+    environment:
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      ARTIFACT_DIR: /opt/penpot-mcp-headless/artifacts
+      PENPOT_NAV_PORT: "4410"
+    volumes:
+      - type: bind
+        source: ${PENPOT_MCP_HEADLESS_ENV_FILE:?set PENPOT_MCP_HEADLESS_ENV_FILE}
+        target: /run/secrets/headless.env
+        read_only: true
+      - type: bind
+        source: ${PENPOT_MCP_HEADLESS_DIR:?set PENPOT_MCP_HEADLESS_DIR}/keep-open.mjs
+        target: /opt/penpot-mcp-headless/keep-open.mjs
+        read_only: true
+      - type: bind
+        source: ${PENPOT_MCP_HEADLESS_DIR}/nav-mcp.mjs
+        target: /opt/penpot-mcp-headless/nav-mcp.mjs
+        read_only: true
+      - type: bind
+        source: ${PENPOT_MCP_HEADLESS_DIR}/nav-logic.mjs
+        target: /opt/penpot-mcp-headless/nav-logic.mjs
+        read_only: true
+      - type: bind
+        source: ${PENPOT_MCP_HEADLESS_DIR}/local-proxy.mjs
+        target: /opt/penpot-mcp-headless/local-proxy.mjs
+        read_only: true
+      - mcp_headless_artifacts:/opt/penpot-mcp-headless/artifacts
+    networks:
+      - penpot
+
+volumes:
+  mcp_headless_artifacts:
+
+networks:
+  penpot: {}
