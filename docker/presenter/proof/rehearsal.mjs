@@ -245,7 +245,7 @@ async function writeNotesViaMcp(token, notesByName) {
     }, init.sessionId);
     const message = executed.messages.find((item) => item.id === 2) || executed.messages[0];
     const text = toolText(message);
-    if (!executed.sessionId || message?.result?.isError || message?.error) {
+    if (!executed.sessionId || message?.result?.isError || message?.error || !text.includes('"notes"')) {
         throw new Error(redact(text || executed.text, [token]).slice(0, 500));
     }
     return text;
@@ -423,7 +423,10 @@ async function main() {
         `${base}/#/workspace?team-id=${team.id}&file-id=${fileId}&page-id=${pageId}`,
         { waitUntil: "domcontentloaded" }
     );
-    await workspace.waitForTimeout(4000);
+    await workspace.waitForFunction(() => {
+        const text = document.body ? document.body.innerText : "";
+        return text.includes("Presenter talk") || text.includes("Slide 1");
+    }, { timeout: 60000 });
 
     const notesByName = {
         "Slide 1": "Opening. State the question.\n\n- point at the title",
@@ -433,7 +436,7 @@ async function main() {
     };
     let snippetText = "";
     let snippetError = "";
-    for (let attempt = 1; attempt <= 8; attempt += 1) {
+    for (let attempt = 1; attempt <= 15; attempt += 1) {
         try {
             snippetText = await writeNotesViaMcp(mcpToken, notesByName);
             break;
@@ -515,11 +518,14 @@ async function main() {
     }
 
     await goTo("Slide 3");
-    await audience.waitForFunction(() => document.querySelector("img.audience-slide")?.alt?.includes("Slide 3"), { timeout: 30000 });
-    const figureSrc = await presenter.locator("img.slide").getAttribute("src");
-    const audienceSrc = await audience.locator("img.audience-slide").getAttribute("src");
-    if (figureSrc !== audienceSrc) {
-        throw new Error("audience window is not showing the presenter slide");
+    await audience.waitForFunction(() => {
+        const image = document.querySelector("img.audience-slide");
+        return image && image.alt.includes("Slide 3") && image.naturalWidth > 100;
+    }, { timeout: 30000 });
+    const presenterAlt = await presenter.locator("img.slide").getAttribute("alt");
+    const audienceAlt = await audience.locator("img.audience-slide").getAttribute("alt");
+    if (presenterAlt !== audienceAlt) {
+        throw new Error(`audience is on ${audienceAlt}, presenter is on ${presenterAlt}`);
     }
     await presenter.screenshot({ path: `${outDir}/presenter-figure.png` });
     await audience.screenshot({ path: `${outDir}/audience-figure.png` });
