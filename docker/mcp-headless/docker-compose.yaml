@@ -1,0 +1,48 @@
+# Headless Chromium sidecar for the Penpot MCP plugin.
+#
+# Use it as a second compose file on an existing Penpot project.
+# It does not replace or rebuild penpot-frontend, penpot-backend, or penpot-mcp.
+#
+#   export PENPOT_MCP_HEADLESS_ENV_FILE=/path/to/secret.env
+#   export PENPOT_MCP_HEADLESS_SCRIPT=$PWD/docker/mcp-headless/keep-open.mjs
+#   docker compose -p penpot \
+#     -f ~/penpot/docker-compose.yaml \
+#     -f docker/mcp-headless/docker-compose.yaml \
+#     up -d penpot-mcp-headless
+#
+# secret.env (chmod 600, never commit) must define:
+#   PENPOT_PUBLIC_URI, PENPOT_EMAIL, PENPOT_PASSWORD,
+#   PENPOT_TEAM_ID, PENPOT_FILE_ID
+# Optional: PENPOT_PAGE_ID, CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET
+
+services:
+  penpot-mcp-headless:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: penpot-mcp-headless:2.18.5
+    pull_policy: never
+    restart: unless-stopped
+    init: true
+    user: "0:0"
+    shm_size: "1gb"
+    env_file:
+      - ${PENPOT_MCP_HEADLESS_ENV_FILE:?set PENPOT_MCP_HEADLESS_ENV_FILE to a chmod 600 file}
+    environment:
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      ARTIFACT_DIR: /opt/penpot-mcp-headless/artifacts
+    volumes:
+      - type: bind
+        source: ${PENPOT_MCP_HEADLESS_SCRIPT:-./keep-open.mjs}
+        target: /opt/penpot-mcp-headless/keep-open.mjs
+        read_only: true
+      - mcp_headless_artifacts:/opt/penpot-mcp-headless/artifacts
+    command: ["node", "/opt/penpot-mcp-headless/keep-open.mjs"]
+    networks:
+      - penpot
+
+volumes:
+  mcp_headless_artifacts:
+
+networks:
+  penpot: {}
