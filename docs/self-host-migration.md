@@ -4,7 +4,7 @@
 
 1. 自定义分支必须从 **tag `2.18.3`（`ff7a66f51938b2293260ea27a64e2c4e0833b5e3`）** 拉，不要从 `develop` 拉。
 2. 官方 Dockerfile 的基础镜像在 `dhi.io`，匿名 pull 会 401。本机没有这份登录。要打出和上游一样的镜像，先 `docker login dhi.io`。
-3. `admin-console` 不在这个仓库里。继续用 `penpotapp/admin-console:2.18`，除非另外构建 `penpot/penpot-nitrate`。
+3. `admin-console` 不在这个仓库里。继续用本地已有的 `penpotapp/admin-console@sha256:29c13326e854fd63e18a7231cb1ca26d60f728692bd1207ded003b94aba79390`，不要写 `penpotapp/admin-console:2.18`。
 
 2026-10-27 在这台机器上做了一次不碰现网的预演。预演结果写在文末；现网 compose 项目 `penpot` 没有被停止或改配置。
 
@@ -49,7 +49,7 @@ git checkout -b my-feature 2.18.3
 
 ### admin-console
 
-`penpotapp/admin-console:2.18` 的 source 是 `https://github.com/penpot/penpot-nitrate`，不是本仓库。`bundle_version=2.18.0-RC4-1-gd8dd1b8`，镜像创建于 2026-09-22。本仓库的 `.github/workflows/build-docker-admin-console.yml` 只是用 token 去 nitrate 仓库触发构建。公开 API 读不到 `9a009df`（404），这里也没有 nitrate 的源码。**这个 fork 打不出 admin-console。** 切换时这一项继续用官方镜像。
+`penpotapp/admin-console:2.18` 的 source 是 `https://github.com/penpot/penpot-nitrate`，不是本仓库。`bundle_version=2.18.0-RC4-1-gd8dd1b8`，镜像创建于 2026-09-22。本仓库的 `.github/workflows/build-docker-admin-console.yml` 只是用 token 去 nitrate 仓库触发构建。公开 API 读不到 `9a009df`（404），这里也没有 nitrate 的源码。**这个 fork 打不出 admin-console。** 切换时这一项继续用第 3 条里的 digest，不要写 `:2.18`。
 
 ## 2. 上游怎么打镜像，本机能不能复现
 
@@ -126,6 +126,8 @@ docker compose \
 
 下面的命令假设人在 `~/penpot`，现网项目名是 `penpot`。先在维护窗口做。Cloudflare Tunnel 不用改：它仍然指到本机 9001。
 
+不要在现网执行 `docker compose pull`：`penpotapp/*:2.18` 现在会解析到 2.18.5（migration 0154–0156）。现网只用已经在本地的 `penpot-pinned/*:2.18.3`。
+
 ### 备份（只读现网）
 
 ```bash
@@ -147,7 +149,7 @@ docker run --rm \
 
 ### 切换
 
-镜像要事先打好并在本地 `docker image inspect` 能看到。admin-console 保持官方 tag。
+镜像要事先打好并在本地 `docker image inspect` 能看到。admin-console 保持上面的 digest，不要改成 `:2.18`。
 
 在 `~/penpot/docker-compose.yaml` 里只改这四行的镜像名（或用 compose 的第二份 override，不要手改别的环境变量）：
 
@@ -160,12 +162,13 @@ penpot-exporter:
   image: penpot-local/exporter:2.18.3
 penpot-mcp:
   image: penpot-local/mcp:2.18.3
-# penpot-admin-console 保持 penpotapp/admin-console:2.18
+# penpot-admin-console 保持
+# penpotapp/admin-console@sha256:29c13326e854fd63e18a7231cb1ca26d60f728692bd1207ded003b94aba79390
 ```
 
 ```bash
 cd ~/penpot
-docker compose -p penpot up -d
+docker compose -p penpot up -d --pull never
 docker compose -p penpot ps
 docker logs penpot-penpot-backend-1 2>&1 | grep -E 'apply migration|running migrations' | tail
 ```
@@ -181,58 +184,97 @@ docker exec penpot-penpot-postgres-1 \
 
 ### 停机
 
-只重建 frontend、backend、exporter、mcp 四个容器。Postgres 和 Valkey 的镜像没变，卷也不换。预演里 backend 容器起来后大约 15 秒写到 `welcome to penpot`（版本 `2.18.3`），frontend 的静态页在那之前就已经 200。镜像已经在本地时，现网切换的 HTTP 中断按 **大约 1 分钟** 估计。没有在现网上实际切过。如果还要现场 pull 镜像，时间另算。
+只重建 frontend、backend、exporter、mcp 四个容器。Postgres 和 Valkey 的镜像没变，卷也不换。预演里 backend 容器起来后大约 15 秒写到 `welcome to penpot`（版本 `2.18.3`），frontend 的静态页在那之前就已经 200。镜像已经在本地时，现网切换的 HTTP 中断按 **大约 1 分钟** 估计。没有在现网上实际切过。
 
-### 回滚到 `penpotapp/*:2.18`
+### 回滚到本地 `penpot-pinned/*:2.18.3`
 
-如果新容器起不来，或页面不对，但 **没有** `apply migration`：
+本地已有 `penpot-pinned/{frontend,backend,exporter}:2.18.3`，与当初的 2.18.3 官方镜像是同一个 Id。mcp 还没有这个名字。只给已经在本地的镜像加 tag，不要从 `penpotapp/mcp:2.18` 转 tag，也不要 pull：
+
+```bash
+docker tag sha256:4d9a338f74a855e8e18753b376e7702dfbee3a5af738edb0a17b3ce212020771 penpot-pinned/mcp:2.18.3
+docker image inspect penpot-pinned/frontend:2.18.3 penpot-pinned/backend:2.18.3 \
+  penpot-pinned/exporter:2.18.3 penpot-pinned/mcp:2.18.3 >/dev/null
+```
+
+如果新容器起不来，或页面不对，但 **没有** `apply migration`：把那四行 `image` 改成 `penpot-pinned/<name>:2.18.3`，数据卷不动。
 
 ```bash
 cd ~/penpot
-# 把那四行 image 改回 penpotapp/<name>:2.18
-docker compose -p penpot up -d
+docker compose -p penpot up -d --pull never
 ```
 
-数据卷没动，不需要恢复 dump。官方 `2.18` tag 此刻仍指 2.18.3；如果担心上游以后移动这个浮动 tag，回滚前先把现在的官方镜像再打一个本地钉死的 tag：
+如果日志里出现了 `apply migration`，不要只换镜像，也不要删现网卷。日备在 `/mnt/sdg/penpot-backups/daily`，一对是 `penpot-db-YYYYMMDD-HHMMSS.dump` 和 `penpot-assets-YYYYMMDD-HHMMSS.tar.gz`，只留最近 3 对。先选定最新一对并校验，通过之后才建新卷。现网卷留着，作为换卷前的副本。
 
 ```bash
-docker tag penpotapp/frontend:2.18 penpotapp/frontend:2.18.3-running
-docker tag penpotapp/backend:2.18  penpotapp/backend:2.18.3-running
-docker tag penpotapp/exporter:2.18 penpotapp/exporter:2.18.3-running
-docker tag penpotapp/mcp:2.18      penpotapp/mcp:2.18.3-running
+set -euo pipefail
+BACKUP_DIR=/mnt/sdg/penpot-backups/daily
+stamp=$(ls -1 "$BACKUP_DIR"/penpot-db-*.dump | sed 's|.*/penpot-db-||; s|\.dump$||' | sort | tail -1)
+DB="$BACKUP_DIR/penpot-db-${stamp}.dump"
+ASSETS="$BACKUP_DIR/penpot-assets-${stamp}.tar.gz"
+echo "db=$DB"
+echo "assets=$ASSETS"
+test -s "$DB"
+test -s "$ASSETS"
+docker run --rm --pull never --entrypoint pg_restore \
+  -v "$BACKUP_DIR":/backup:ro \
+  penpot-pinned/postgres:15 \
+  -f /dev/null "/backup/penpot-db-${stamp}.dump"
+tar -tzf "$ASSETS" >/dev/null
+echo "backup pair ok"
+
+HOLD=$(date -u +%Y%m%d-%H%M%S)
+PGVOL="penpot_restore_pg_${HOLD}"
+ASSETVOL="penpot_restore_assets_${HOLD}"
+echo "pgvol=$PGVOL"
+echo "assetvol=$ASSETVOL"
+docker volume create "$PGVOL"
+docker volume create "$ASSETVOL"
+
+docker run -d --pull never --name "penpot-restore-${HOLD}" \
+  -e POSTGRES_DB=penpot \
+  -e POSTGRES_USER=penpot \
+  -e POSTGRES_PASSWORD=penpot \
+  -v "${PGVOL}:/var/lib/postgresql/data" \
+  penpot-pinned/postgres:15
+for i in $(seq 1 30); do
+  docker exec "penpot-restore-${HOLD}" pg_isready -U penpot && break
+  sleep 1
+done
+docker exec "penpot-restore-${HOLD}" pg_isready -U penpot
+docker exec -i "penpot-restore-${HOLD}" \
+  pg_restore -U penpot -d penpot --no-owner --no-acl < "$DB"
+docker exec "penpot-restore-${HOLD}" \
+  psql -U penpot -d penpot -c "SELECT count(*) FROM migrations WHERE module='main';"
+docker stop "penpot-restore-${HOLD}"
+docker rm "penpot-restore-${HOLD}"
+
+docker run --rm --pull never --entrypoint tar \
+  -v "${ASSETVOL}:/to" \
+  -v "$BACKUP_DIR":/backup:ro \
+  penpot-pinned/postgres:15 \
+  -C /to -xzf "/backup/penpot-assets-${stamp}.tar.gz"
+
+cat <<EOF
+volumes:
+  penpot_postgres_v15:
+    external: true
+    name: ${PGVOL}
+  penpot_assets:
+    external: true
+    name: ${ASSETVOL}
+EOF
 ```
 
-`docker tag` 不改正在跑的容器。
+日备是 custom format，所以校验用 `pg_restore -f /dev/null`，不是 `psql`。上面任何一步失败就停，现网卷还没动，也不会打印 volumes 片段。
 
-如果日志里出现了 `apply migration`（说明跑的不是 2.18.3 源码，或者库被别的版本写过），不要只换镜像。停应用容器，用备份把库和 assets 都倒回去，再起官方镜像：
+成功时，片段里的 `name` 已经是展开后的卷名。四份应用镜像改成 `penpot-pinned/<name>:2.18.3`，volumes 换成这份输出。不要删 `penpot_penpot_postgres_v15` 和 `penpot_penpot_assets`。然后：
 
 ```bash
 cd ~/penpot
-docker compose -p penpot stop \
-  penpot-frontend penpot-backend penpot-exporter penpot-mcp penpot-admin-console
-
-docker exec -i penpot-penpot-postgres-1 \
-  psql -U penpot -d postgres -c \
-  "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='penpot' AND pid <> pg_backend_pid();"
-docker exec -i penpot-penpot-postgres-1 \
-  psql -U penpot -d postgres -c "DROP DATABASE penpot;"
-docker exec -i penpot-penpot-postgres-1 \
-  psql -U penpot -d postgres -c "CREATE DATABASE penpot OWNER penpot;"
-docker exec -i penpot-penpot-postgres-1 \
-  pg_restore -U penpot -d penpot --no-owner --no-acl \
-  < ~/penpot-backups/penpot-${stamp}.dump
-
-docker run --rm \
-  -v penpot_penpot_assets:/to \
-  -v "$HOME/penpot-backups:/backup:ro" \
-  alpine \
-  sh -c 'rm -rf /to/* /to/.[!.]* ; tar -C /to -xzf /backup/penpot-assets-STAMP.tgz'
-
-# compose 里的 image 已改回 penpotapp/*:2.18
-docker compose -p penpot up -d
+docker compose -p penpot up -d --pull never
 ```
 
-`pg_restore` 之前要先看 dump 是不是 `-Fc`。上面的备份命令用的是 custom format。
+新卷如果不对，把这两个 `name` 改回 `penpot_penpot_postgres_v15` 和 `penpot_penpot_assets`，再执行同一条 `up -d --pull never`。
 
 ### 以后跟上游同步
 
