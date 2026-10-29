@@ -4,7 +4,7 @@
 
 1. 自定义分支必须从 **tag `2.18.3`（`ff7a66f51938b2293260ea27a64e2c4e0833b5e3`）** 拉，不要从 `develop` 拉。
 2. 官方 Dockerfile 的基础镜像在 `dhi.io`，匿名 pull 会 401。本机没有这份登录。要打出和上游一样的镜像，先 `docker login dhi.io`。
-3. `admin-console` 不在这个仓库里。继续用本地已有的 `penpotapp/admin-console@sha256:29c13326e854fd63e18a7231cb1ca26d60f728692bd1207ded003b94aba79390`，不要写 `penpotapp/admin-console:2.18`。
+3. `admin-console` 不在这个仓库里。继续用本地已有的 `penpotapp/admin-console@sha256:5935b5adbf33eb7abaabfab657fe8f5d465cac08e62e340f932ddb35ce0f311f`，不要写 `penpotapp/admin-console:2.18`。
 
 2026-10-27 在这台机器上做了一次不碰现网的预演。预演结果写在文末；现网 compose 项目 `penpot` 没有被停止或改配置。
 
@@ -163,7 +163,7 @@ penpot-exporter:
 penpot-mcp:
   image: penpot-local/mcp:2.18.3
 # penpot-admin-console 保持
-# penpotapp/admin-console@sha256:29c13326e854fd63e18a7231cb1ca26d60f728692bd1207ded003b94aba79390
+# penpotapp/admin-console@sha256:5935b5adbf33eb7abaabfab657fe8f5d465cac08e62e340f932ddb35ce0f311f
 ```
 
 ```bash
@@ -187,6 +187,8 @@ docker exec penpot-penpot-postgres-1 \
 只重建 frontend、backend、exporter、mcp 四个容器。Postgres 和 Valkey 的镜像没变，卷也不换。预演里 backend 容器起来后大约 15 秒写到 `welcome to penpot`（版本 `2.18.3`），frontend 的静态页在那之前就已经 200。镜像已经在本地时，现网切换的 HTTP 中断按 **大约 1 分钟** 估计。没有在现网上实际切过。
 
 ### 回滚到本地 `penpot-pinned/*:2.18.3`
+
+截至 2026-10-28，现网跑的是 2.18.5（镜像按 digest 钉死，migration 到 0156）。2.18.3 镜像留在 `penpotapp-running/*:2.18.3` 和 `penpot-pinned/*:2.18.3`。升级前的备份是 `penpot-db-20261028-213015` 和 `penpot-assets-20261028-213015`；按保留 3 份，再过 3 次夜间备份可能会被转走。
 
 本地已有 `penpot-pinned/{frontend,backend,exporter}:2.18.3`，与当初的 2.18.3 官方镜像是同一个 Id。mcp 还没有这个名字。只给已经在本地的镜像加 tag，不要从 `penpotapp/mcp:2.18` 转 tag，也不要 pull：
 
@@ -236,11 +238,23 @@ docker run -d --pull never --name "penpot-restore-${HOLD}" \
   -e POSTGRES_PASSWORD=penpot \
   -v "${PGVOL}:/var/lib/postgresql/data" \
   penpot-pinned/postgres:15
-for i in $(seq 1 30); do
-  docker exec "penpot-restore-${HOLD}" pg_isready -U penpot && break
+ready=0
+for i in $(seq 1 60); do
+  if docker exec "penpot-restore-${HOLD}" psql -U penpot -d penpot -c 'select 1' >/dev/null 2>&1 \
+    && docker logs "penpot-restore-${HOLD}" 2>&1 | awk '
+      /PostgreSQL init process complete/ {seen=1}
+      seen && /database system is ready to accept connections/ {ok=1}
+      END {exit !ok}'
+  then
+    ready=1
+    break
+  fi
   sleep 1
 done
-docker exec "penpot-restore-${HOLD}" pg_isready -U penpot
+if [[ "$ready" != 1 ]]; then
+  echo "timed out waiting for postgres init" >&2
+  exit 1
+fi
 docker exec -i "penpot-restore-${HOLD}" \
   pg_restore -U penpot -d penpot --no-owner --no-acl < "$DB"
 docker exec "penpot-restore-${HOLD}" \
