@@ -1,0 +1,46 @@
+# Presenter sidecar. Third compose file on a Penpot 2.18.5 project.
+# It does not replace penpot-frontend, penpot-backend, penpot-exporter,
+# or penpot-mcp.
+#
+# Copy this directory to ~/penpot/presenter (see ROLLOUT.md). Every
+# live `up` passes three files, in this order:
+#   ~/penpot/docker-compose.yaml
+#   ~/penpot/mcp-headless/docker-compose.yaml
+#   ~/penpot/presenter/docker-compose.yaml
+#
+#   export PENPOT_PRESENTER_DIR=$HOME/penpot/presenter
+#   docker build -t penpot-presenter:2.18.5 "$PENPOT_PRESENTER_DIR"
+#   docker compose -p penpot \
+#     -f ~/penpot/docker-compose.yaml \
+#     -f ~/penpot/mcp-headless/docker-compose.yaml \
+#     -f ~/penpot/presenter/docker-compose.yaml \
+#     up -d --pull never penpot-presenter
+#   docker compose -p penpot \
+#     -f ~/penpot/docker-compose.yaml \
+#     -f ~/penpot/mcp-headless/docker-compose.yaml \
+#     -f ~/penpot/presenter/docker-compose.yaml \
+#     up -d --pull never --no-deps --force-recreate penpot-frontend
+#
+# The page is only at /presenter/ on the Penpot origin. Port 8080 stays
+# on the compose network. It is not published on the host.
+
+services:
+  penpot-frontend:
+    volumes:
+      - ${PENPOT_PRESENTER_DIR:?set PENPOT_PRESENTER_DIR}/nginx-presenter.conf:/etc/nginx/overrides/server.d/presenter.conf:ro
+
+  penpot-presenter:
+    image: penpot-presenter:2.18.5
+    pull_policy: never
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - penpot
+
+networks:
+  penpot: {}
