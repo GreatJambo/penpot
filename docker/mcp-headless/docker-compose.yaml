@@ -11,9 +11,11 @@
 #     up -d penpot-mcp-headless
 #
 # secret.env (chmod 600, never commit) must define:
-#   PENPOT_PUBLIC_URI, PENPOT_EMAIL, PENPOT_PASSWORD,
-#   PENPOT_TEAM_ID, PENPOT_FILE_ID
-# Optional: PENPOT_PAGE_ID, CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET
+#   PENPOT_PUBLIC_URI, PENPOT_EMAIL, PENPOT_PASSWORD
+# Optional: PENPOT_INTERNAL_ORIGIN, CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET
+#
+# The nav MCP listens on port 4410 inside the compose network and is
+# published only on 127.0.0.1. Do not put it on the public hostname.
 
 services:
   penpot-mcp-headless:
@@ -28,13 +30,24 @@ services:
     shm_size: "1gb"
     env_file:
       - ${PENPOT_MCP_HEADLESS_ENV_FILE:?set PENPOT_MCP_HEADLESS_ENV_FILE to a chmod 600 file}
+    ports:
+      - "127.0.0.1:4410:4410"
     environment:
       LIBGL_ALWAYS_SOFTWARE: "1"
       ARTIFACT_DIR: /opt/penpot-mcp-headless/artifacts
+      PENPOT_NAV_PORT: "4410"
     volumes:
       - type: bind
-        source: ${PENPOT_MCP_HEADLESS_SCRIPT:-./keep-open.mjs}
+        source: ${PENPOT_MCP_HEADLESS_DIR:?set PENPOT_MCP_HEADLESS_DIR}/keep-open.mjs
         target: /opt/penpot-mcp-headless/keep-open.mjs
+        read_only: true
+      - type: bind
+        source: ${PENPOT_MCP_HEADLESS_DIR}/nav-mcp.mjs
+        target: /opt/penpot-mcp-headless/nav-mcp.mjs
+        read_only: true
+      - type: bind
+        source: ${PENPOT_MCP_HEADLESS_DIR}/local-proxy.mjs
+        target: /opt/penpot-mcp-headless/local-proxy.mjs
         read_only: true
       - mcp_headless_artifacts:/opt/penpot-mcp-headless/artifacts
     command: ["node", "/opt/penpot-mcp-headless/keep-open.mjs"]
