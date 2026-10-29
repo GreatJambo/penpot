@@ -20,30 +20,81 @@ import fs from "node:fs";
 import path from "node:path";
 import { startLocalProxy } from "./local-proxy.mjs";
 import { startNavServer } from "./nav-mcp.mjs";
+import {
+    CONTEXT_MAX_AGE_MS,
+    OPEN_WAIT_MS,
+    RELOGIN_BUDGET_MS,
+    TASK_WAIT_MS,
+    notePluginFrame,
+    openWaitMode,
+    rememberHost,
+    sessionDead,
+    shouldRecycleContext,
+} from "./nav-logic.mjs";
 
-const publicUri = required("PENPOT_PUBLIC_URI").replace(/\/$/, "");
-const email = required("PENPOT_EMAIL");
-const password = required("PENPOT_PASSWORD");
-const internalOrigin = (process.env.PENPOT_INTERNAL_ORIGIN || "").replace(/\/$/, "");
+function loadEnvFile(filePath) {
+    const out = {};
+    const text = fs.readFileSync(filePath, "utf8");
+    for (const line of text.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) {
+            continue;
+        }
+        const index = trimmed.indexOf("=");
+        out[trimmed.slice(0, index)] = trimmed.slice(index + 1);
+    }
+    return out;
+}
+
+const secretFile = process.env.PENPOT_HEADLESS_ENV_FILE || "/run/secrets/headless.env";
+const fileEnv = fs.existsSync(secretFile) ? loadEnvFile(secretFile) : {};
+
+function setting(name) {
+    const value = fileEnv[name] || process.env[name] || "";
+    return value;
+}
+
+const publicUri = (setting("PENPOT_PUBLIC_URI") || "").replace(/\/$/, "");
+const email = setting("PENPOT_EMAIL");
+const password = setting("PENPOT_PASSWORD");
+const navToken = setting("PENPOT_MCP_USER_TOKEN");
+const internalOrigin = (setting("PENPOT_INTERNAL_ORIGIN") || "").replace(/\/$/, "");
+delete process.env.PENPOT_PASSWORD;
+delete process.env.PENPOT_MCP_USER_TOKEN;
+delete process.env.PENPOT_INTERNAL_ORIGIN;
+if (!publicUri || !email || !password) {
+    console.error("missing PENPOT_PUBLIC_URI, PENPOT_EMAIL, or PENPOT_PASSWORD");
+    process.exit(1);
+}
 const artifactDir = process.env.ARTIFACT_DIR || "/opt/penpot-mcp-headless/artifacts";
 const navPort = Number(process.env.PENPOT_NAV_PORT || "4410");
+const contextMaxAge = Number(process.env.PENPOT_CONTEXT_MAX_AGE_MS || CONTEXT_MAX_AGE_MS);
 const publicUrl = new URL(publicUri);
 const internalUrl = internalOrigin ? new URL(internalOrigin) : null;
 const splitOrigin = Boolean(internalUrl && internalUrl.hostname !== publicUrl.hostname);
 
 const LOGIN_ATTEMPT_LIMIT = 5;
-const TASK_WAIT_MS = 120000;
-const OPEN_WAIT_MS = 180000;
+
+class SessionDead extends Error {
+    constructor() {
+        super("session dead");
+        this.name = "SessionDead";
+    }
+}
 
 const state = {
     page: null,
     ready: false,
     pluginOpen: false,
     pluginSerial: 0,
+    loggedIn: false,
+    navDepth: 0,
     sockets: new Map(),
     hosts: new Set(),
     upstreams: new Set(),
     lock: Promise.resolve(),
+    lastTarget: null,
+    contextStarted: 0,
 };
 
 function required(name) {
@@ -70,7 +121,14 @@ function sleep(ms) {
 }
 
 function withLock(fn) {
-    const run = state.lock.then(fn, fn);
+    const run = state.lock.then(async () => {
+        state.navDepth += 1;
+        try {
+            return await fn();
+        } finally {
+            state.navDepth -= 1;
+        }
+    });
     state.lock = run.then(
         () => {},
         () => {}
@@ -127,7 +185,7 @@ function accessHeaders() {
 
 function noteHost(raw) {
     try {
-        state.hosts.add(new URL(raw).host);
+        rememberHost(state.hosts, new URL(raw).host);
     } catch {
         // ignore non-URL frames
     }
@@ -162,23 +220,7 @@ function trackSocket(socket) {
     state.pluginOpen = true;
     console.log("plugin websocket open");
     const take = (event, incoming) => {
-        const text = frameText(event);
-        if (!text.startsWith("{")) {
-            return;
-        }
-        let message;
-        try {
-            message = JSON.parse(text);
-        } catch {
-            return;
-        }
-        if (incoming && message && message.id && message.task) {
-            ids.add(message.id);
-            return;
-        }
-        if (!incoming && message && message.id && Object.prototype.hasOwnProperty.call(message, "success")) {
-            ids.delete(message.id);
-        }
+        notePluginFrame(ids, incoming, frameText(event));
     };
     socket.on("framereceived", (event) => take(event, true));
     socket.on("framesent", (event) => take(event, false));
@@ -236,16 +278,25 @@ async function dismissOverlays(page) {
     }
 }
 
-async function login(page) {
+async function loginFormVisible(page) {
+    return page.locator('input[name="email"]').first().isVisible().catch(() => false);
+}
+
+async function login(page, { force = false } = {}) {
+    if (force) {
+        await page.context().clearCookies();
+    }
     await page.goto(`${publicUri}/#/auth/login`, { waitUntil: "domcontentloaded", timeout: 60000 });
     await page.waitForTimeout(1500);
     const here = await readLocation(page).catch(() => ({ login: true }));
-    if (!here.login) {
+    const form = await loginFormVisible(page);
+    if (!force && !sessionDead({ hashLogin: here.login, loginFormVisible: form })) {
         console.log("already signed in");
+        state.loggedIn = true;
         return;
     }
     const emailInput = page.locator('input[name="email"]').first();
-    await emailInput.waitFor({ state: "visible", timeout: 60000 });
+    await emailInput.waitFor({ state: "visible", timeout: force ? 20000 : 60000 });
     await emailInput.fill(email);
     const passwordInput = page.locator('input[name="password"]').first();
     if (!(await passwordInput.isVisible().catch(() => false))) {
@@ -257,8 +308,9 @@ async function login(page) {
     const deadline = Date.now() + 45000;
     while (Date.now() < deadline) {
         const now = await readLocation(page).catch(() => null);
-        if (now && !now.login) {
+        if (now && !now.login && !(await loginFormVisible(page))) {
             console.log("signed in");
+            state.loggedIn = true;
             return;
         }
         const wrong = await page.getByText("Email or password is incorrect.").count().catch(() => 0);
@@ -285,21 +337,54 @@ async function rpc(page, command, params) {
         },
         { command, params }
     );
+    if (sessionDead({ rpcStatus: result.status })) {
+        throw new SessionDead();
+    }
     if (result.status < 200 || result.status >= 300) {
         throw new Error(`${command} failed with HTTP ${result.status}`);
     }
     return JSON.parse(result.text);
 }
 
+async function ensureAlive(page) {
+    const where = await readLocation(page).catch(() => ({ login: true }));
+    const form = await loginFormVisible(page);
+    if (sessionDead({ hashLogin: Boolean(where.login), loginFormVisible: form })) {
+        throw new SessionDead();
+    }
+}
+
+async function withNav(fn) {
+    return withLock(async () => {
+        const page = state.page;
+        if (!state.ready || !page) {
+            throw new Error("sidecar is not logged in yet");
+        }
+        try {
+            await ensureAlive(page);
+            return await fn();
+        } catch (error) {
+            if (!(error instanceof SessionDead)) {
+                throw error;
+            }
+            console.log("session dead; signing in again");
+            const started = Date.now();
+            await login(page, { force: true });
+            if (Date.now() - started > RELOGIN_BUDGET_MS) {
+                throw new Error("re-login exceeded its time budget");
+            }
+            state.ready = true;
+            return await fn();
+        }
+    });
+}
+
 function idOf(row) {
     return String(row.id || row.fileId || "");
 }
 
-async function listFiles() {
+async function listFilesInner() {
     const page = state.page;
-    if (!state.ready || !page) {
-        throw new Error("sidecar is not logged in yet");
-    }
     const teams = await rpc(page, "get-teams", {});
     const tree = [];
     for (const team of teams) {
@@ -340,8 +425,12 @@ function flatten(tree) {
     return rows;
 }
 
+async function listFiles() {
+    return withNav(() => listFilesInner());
+}
+
 async function resolveFile(args) {
-    const tree = await listFiles();
+    const tree = await listFilesInner();
     const rows = flatten(tree);
     if (args.fileId) {
         const found = rows.find((row) => row.id === args.fileId);
@@ -382,11 +471,12 @@ async function waitUntilIdle(deadline = Date.now() + TASK_WAIT_MS) {
     }
 }
 
-async function currentFile() {
+async function currentFileInner() {
     const page = state.page;
-    if (!state.ready || !page) {
+    if (!page) {
         return { open: false, connected: false };
     }
+    await ensureAlive(page);
     const where = await readLocation(page);
     return {
         open: Boolean(where.fileId),
@@ -398,75 +488,97 @@ async function currentFile() {
     };
 }
 
-async function openFile(args) {
-    return withLock(async () => {
-        const page = state.page;
-        if (!state.ready || !page) {
-            throw new Error("sidecar is not logged in yet");
+async function currentFile() {
+    return withNav(() => currentFileInner());
+}
+
+function rememberTarget(file, pageId) {
+    state.lastTarget = {
+        fileId: file.id,
+        teamId: file.teamId,
+        pageId: pageId || undefined,
+    };
+}
+
+async function openFileInner(args) {
+    const page = state.page;
+    const file = await resolveFile(args || {});
+    const where = await readLocation(page);
+    const mode = openWaitMode({
+        currentFileId: where.fileId,
+        targetFileId: file.id,
+        currentPageId: where.pageId,
+        requestedPageId: args.pageId,
+        pluginOpen: state.pluginOpen,
+    });
+    if (mode === "noop") {
+        rememberTarget(file, where.pageId);
+        return {
+            fileId: file.id,
+            fileName: file.name,
+            teamId: file.teamId,
+            pageId: where.pageId,
+            connected: true,
+            switched: false,
+            mode,
+        };
+    }
+    await waitUntilIdle();
+    const since = state.pluginSerial;
+    console.log(mode === "page" ? `opening page in ${file.id}` : `opening file ${file.id}`);
+    await page.goto(workspaceUrl(file.teamId, file.id, args.pageId || ""), {
+        waitUntil: "domcontentloaded",
+        timeout: 60000,
+    });
+    const deadline = Date.now() + OPEN_WAIT_MS;
+    while (Date.now() < deadline) {
+        await dismissOverlays(page);
+        const now = await readLocation(page).catch(() => null);
+        const form = await loginFormVisible(page);
+        if (now && sessionDead({ hashLogin: now.login, loginFormVisible: form })) {
+            throw new SessionDead();
         }
-        const file = await resolveFile(args || {});
-        const where = await readLocation(page);
-        const sameFile = where.fileId === file.id;
-        const samePage = !args.pageId || where.pageId === args.pageId;
-        if (sameFile && samePage && state.pluginOpen) {
+        const crashed = await page.getByText("Internal Error").count().catch(() => 0);
+        if (crashed > 0) {
+            throw new Error("workspace showed Internal Error");
+        }
+        const hashOk = now && now.fileId === file.id && (!args.pageId || now.pageId === args.pageId);
+        const pluginOk = state.pluginOpen && (mode === "page" || state.pluginSerial > since);
+        if (hashOk && pluginOk) {
+            await shot(page, "connected.png");
+            rememberTarget(file, now.pageId);
+            writeStatus("connected", { fileId: file.id, teamId: file.teamId, pageId: now.pageId });
+            console.log("plugin connected");
             return {
                 fileId: file.id,
                 fileName: file.name,
                 teamId: file.teamId,
-                pageId: where.pageId,
+                pageId: now.pageId,
+                title: now.title,
                 connected: true,
-                switched: false,
+                switched: true,
+                mode,
             };
         }
-        await waitUntilIdle();
-        const since = state.pluginSerial;
-        console.log(`opening file ${file.id}`);
-        await page.goto(workspaceUrl(file.teamId, file.id, args.pageId || ""), {
-            waitUntil: "domcontentloaded",
-            timeout: 60000,
-        });
-        const deadline = Date.now() + OPEN_WAIT_MS;
-        while (Date.now() < deadline) {
-            await dismissOverlays(page);
-            const now = await readLocation(page).catch(() => null);
-            if (now && now.login) {
-                throw new Error("session ended while opening the file");
-            }
-            const crashed = await page.getByText("Internal Error").count().catch(() => 0);
-            if (crashed > 0) {
-                throw new Error("workspace showed Internal Error");
-            }
-            if (
-                now &&
-                now.fileId === file.id &&
-                (!args.pageId || now.pageId === args.pageId) &&
-                state.pluginOpen &&
-                state.pluginSerial > since
-            ) {
-                await shot(page, "connected.png");
-                writeStatus("connected", { fileId: file.id, teamId: file.teamId, pageId: now.pageId });
-                console.log("plugin connected");
-                return {
-                    fileId: file.id,
-                    fileName: file.name,
-                    teamId: file.teamId,
-                    pageId: now.pageId,
-                    title: now.title,
-                    connected: true,
-                    switched: true,
-                };
-            }
-            await sleep(500);
-        }
-        await shot(page, "workspace-timeout.png");
-        throw new Error("timed out waiting for the MCP plugin");
-    });
+        await sleep(500);
+    }
+    await shot(page, "workspace-timeout.png");
+    throw new Error(mode === "page" ? "timed out waiting for the page" : "timed out waiting for the MCP plugin");
+}
+
+async function openFile(args) {
+    return withNav(() => openFileInner(args || {}));
+}
+
+function healthy() {
+    const page = state.page;
+    return Boolean(state.ready && state.loggedIn && page && !page.isClosed());
 }
 
 function chromiumArgs() {
-    const args = ["--disable-gpu", "--use-gl=angle", "--use-angle=swiftshader", "--no-sandbox", "--disable-dev-shm-usage"];
+    const args = ["--disable-gpu", "--use-gl=angle", "--use-angle=swiftshader", "--disable-dev-shm-usage"];
     if (splitOrigin) {
-        args.push(`--host-resolver-rules=MAP ${publicUrl.hostname} 127.0.0.1, MAP * ~NOTFOUND`);
+        args.push(`--host-resolver-rules=MAP ${publicUrl.hostname} 127.0.0.1, MAP * ^NOTFOUND`);
         args.push("--ignore-certificate-errors");
         args.push("--disable-features=UseDnsHttpsSvcb,AsyncDns");
     }
@@ -476,6 +588,10 @@ function chromiumArgs() {
 async function main() {
     fs.mkdirSync(artifactDir, { recursive: true });
     writeStatus("starting");
+    if (!["localhost", "127.0.0.1"].includes(publicUrl.hostname) && !splitOrigin) {
+        console.error("refusing to open a public host without PENPOT_INTERNAL_ORIGIN");
+        process.exit(1);
+    }
     if (splitOrigin) {
         await startLocalProxy({
             publicUrl,
@@ -489,8 +605,11 @@ async function main() {
         });
         console.log(`public host ${publicUrl.hostname} is forced to the local proxy`);
     }
-    startNavServer(navPort, { listFiles, openFile, currentFile });
+    startNavServer(navPort, { listFiles, openFile, currentFile, healthy }, navToken);
 
+    // chromiumSandbox stays off. Turning it on fails in this container
+    // ("Chromium sandboxing failed") unless Docker's seccomp profile is
+    // removed, which is a wider privilege change than running as pwuser.
     const browser = await chromium.launch({ headless: true, args: chromiumArgs() });
     browser.on("disconnected", () => {
         console.log("browser closed; exiting");
@@ -510,17 +629,41 @@ async function main() {
         state.ready = false;
         attach(page);
         try {
-            await login(page);
+            state.contextStarted = Date.now();
+            await withLock(async () => {
+                await login(page);
+                state.ready = true;
+                if (state.lastTarget) {
+                    console.log("reopening last file");
+                    await openFileInner(state.lastTarget);
+                }
+            });
             loginFailures = 0;
-            await page.goto(`${publicUri}/#/dashboard`, { waitUntil: "domcontentloaded", timeout: 60000 });
-            state.ready = true;
-            writeStatus("idle");
-            console.log("idle on dashboard");
-            await shot(page, "dashboard.png");
+            if (!state.lastTarget) {
+                await page.goto(`${publicUri}/#/dashboard`, { waitUntil: "domcontentloaded", timeout: 60000 });
+            }
+            writeStatus(state.lastTarget ? "connected" : "idle");
+            console.log(state.lastTarget ? "plugin connected" : "idle on dashboard");
+            await shot(page, state.lastTarget ? "connected.png" : "dashboard.png");
             while (state.page === page && !page.isClosed()) {
                 await sleep(5000);
+                if (state.navDepth > 0) {
+                    continue;
+                }
+                if (
+                    shouldRecycleContext({
+                        ageMs: Date.now() - state.contextStarted,
+                        navDepth: state.navDepth,
+                        inflight: inflightCount(),
+                        maxAge: contextMaxAge,
+                    })
+                ) {
+                    console.log("recycling browser context");
+                    break;
+                }
                 const where = await readLocation(page).catch(() => null);
-                if (!where || where.login) {
+                const form = await loginFormVisible(page);
+                if (!where || sessionDead({ hashLogin: Boolean(where && where.login), loginFormVisible: form })) {
                     console.log("session ended; signing in again");
                     break;
                 }

@@ -64,7 +64,14 @@ docker compose -p penpot --pull never \
 
 The second command restarts only the frontend, so nginx loads the
 mounted `/mcp-nav/stream` snippet. See `ROLLOUT.md` for the live steps
-and the rollback.
+and the rollback. Set `PENPOT_MCP_HEADLESS_DIR` before either command:
+the image build context is that directory.
+
+`/mcp-nav/stream` allows 300 seconds. One `open_file` stays under that
+(60s for a task already running, 120s to open, 45s for one re-login).
+The official `/mcp/ws` and `/mcp/stream` locations still log the query
+string, the same as they do for a desktop browser. A snippet cannot
+change those locations without defining them again.
 
 Set `PENPOT_PUBLIC_URI` to the origin the editor is configured with.
 Set `PENPOT_INTERNAL_ORIGIN` to `http://penpot-frontend:8080`. Chromium

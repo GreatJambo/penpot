@@ -11,6 +11,12 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
     LIBGL_ALWAYS_SOFTWARE=1
 
 RUN npm install --omit=dev playwright@1.55.0 \
-    && npm cache clean --force
+    && npm cache clean --force \
+    && mkdir -p /opt/penpot-mcp-headless/artifacts \
+    && chmod 1777 /opt/penpot-mcp-headless/artifacts
 
-CMD ["node", "/opt/penpot-mcp-headless/keep-open.mjs"]
+COPY entrypoint.sh /opt/penpot-mcp-headless/entrypoint.sh
+RUN chmod 755 /opt/penpot-mcp-headless/entrypoint.sh
+
+USER pwuser
+ENTRYPOINT ["/opt/penpot-mcp-headless/entrypoint.sh"]

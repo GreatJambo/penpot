@@ -10,13 +10,7 @@
 
 import http from "node:http";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
-
-const expectedToken = process.env.PENPOT_MCP_USER_TOKEN || "";
-const expectedDigest = createHash("sha256").update(expectedToken, "utf8").digest();
-
-if (!expectedToken) {
-    console.error("PENPOT_MCP_USER_TOKEN is unset; nav MCP rejects every call");
-}
+import { SESSION_IDLE_MS, expireSessions } from "./nav-logic.mjs";
 
 /**
  * True only when the presented token is the configured one.
@@ -25,9 +19,11 @@ if (!expectedToken) {
  * leak the length and does not throw when the lengths differ.
  *
  * @param {string | null} presented
+ * @param {string} expectedToken
+ * @param {Buffer} expectedDigest
  * @returns {boolean}
  */
-function tokenAccepted(presented) {
+export function tokenAccepted(presented, expectedToken, expectedDigest) {
     if (!expectedToken) {
         return false;
     }
@@ -68,10 +64,18 @@ const tools = [
 
 /**
  * @param {number} port
- * @param {{ listFiles: () => Promise<unknown>, openFile: (args: object) => Promise<unknown>, currentFile: () => Promise<unknown> }} api
+ * @param {{ listFiles: () => Promise<unknown>, openFile: (args: object) => Promise<unknown>, currentFile: () => Promise<unknown>, healthy?: () => boolean }} api
+ * @param {string} expectedToken
+ * @param {{ sessionIdleMs?: number }} [options]
  */
-export function startNavServer(port, api) {
+export function startNavServer(port, api, expectedToken, options = {}) {
     const sessions = new Map();
+    const idleMs = options.sessionIdleMs ?? SESSION_IDLE_MS;
+    const token = expectedToken || "";
+    const expectedDigest = createHash("sha256").update(token, "utf8").digest();
+    if (!token) {
+        console.error("PENPOT_MCP_USER_TOKEN is unset; nav MCP rejects every call");
+    }
 
     function send(res, status, sessionId, payload) {
         const headers = { "content-type": "application/json" };
@@ -115,6 +119,9 @@ export function startNavServer(port, api) {
                 status: 404,
                 body: { jsonrpc: "2.0", id: body.id, error: { code: -32001, message: "unknown session" } },
             };
+        }
+        if (sessionId) {
+            sessions.set(sessionId, Date.now());
         }
         if (body.method === "tools/list") {
             return {
@@ -171,15 +178,27 @@ export function startNavServer(port, api) {
     const server = http.createServer(async (req, res) => {
         const url = new URL(req.url || "/", "http://127.0.0.1");
         if (req.method === "GET" && url.pathname === "/health") {
-            send(res, 200, null, { ok: true });
+            const ok = api.healthy ? api.healthy() : false;
+            send(res, ok ? 200 : 503, null, { ok });
             return;
         }
         if (url.pathname !== "/mcp" && url.pathname !== "/mcp-nav/stream") {
             send(res, 404, null, { error: "not found" });
             return;
         }
-        if (!tokenAccepted(url.searchParams.get("userToken"))) {
+        if (!tokenAccepted(url.searchParams.get("userToken"), token, expectedDigest)) {
             send(res, 401, null, { error: "unauthorized" });
+            return;
+        }
+        const headerSession = req.headers["mcp-session-id"];
+        const sessionId = typeof headerSession === "string" ? headerSession : undefined;
+        expireSessions(sessions, Date.now(), idleMs);
+        if (req.method === "DELETE") {
+            if (sessionId) {
+                sessions.delete(sessionId);
+            }
+            res.writeHead(204);
+            res.end();
             return;
         }
         if (req.method !== "POST") {
@@ -200,13 +219,13 @@ export function startNavServer(port, api) {
                 return;
             }
         }
-        const sessionId = req.headers["mcp-session-id"];
-        const result = await handle(body, typeof sessionId === "string" ? sessionId : undefined);
+        const result = await handle(body, sessionId);
         send(res, result.status, result.sessionId, result.body);
     });
 
     server.listen(port, "0.0.0.0", () => {
-        console.log(`nav MCP listening on 0.0.0.0:${port}/mcp`);
+        const bound = server.address();
+        console.log(`nav MCP listening on 0.0.0.0:${bound && bound.port}/mcp`);
     });
     return server;
 }

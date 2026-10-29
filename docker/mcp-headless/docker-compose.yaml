@@ -29,21 +29,28 @@ services:
 
   penpot-mcp-headless:
     build:
-      context: .
+      context: ${PENPOT_MCP_HEADLESS_DIR:?set PENPOT_MCP_HEADLESS_DIR}
       dockerfile: Dockerfile
     image: penpot-mcp-headless:2.18.5
     pull_policy: never
     restart: unless-stopped
     init: true
-    user: "0:0"
     shm_size: "1gb"
-    env_file:
-      - ${PENPOT_MCP_HEADLESS_ENV_FILE:?set PENPOT_MCP_HEADLESS_ENV_FILE to a chmod 600 file}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4410/health').then((r)=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
     environment:
       LIBGL_ALWAYS_SOFTWARE: "1"
       ARTIFACT_DIR: /opt/penpot-mcp-headless/artifacts
       PENPOT_NAV_PORT: "4410"
     volumes:
+      - type: bind
+        source: ${PENPOT_MCP_HEADLESS_ENV_FILE:?set PENPOT_MCP_HEADLESS_ENV_FILE}
+        target: /run/secrets/headless.env
+        read_only: true
       - type: bind
         source: ${PENPOT_MCP_HEADLESS_DIR:?set PENPOT_MCP_HEADLESS_DIR}/keep-open.mjs
         target: /opt/penpot-mcp-headless/keep-open.mjs
@@ -53,11 +60,14 @@ services:
         target: /opt/penpot-mcp-headless/nav-mcp.mjs
         read_only: true
       - type: bind
+        source: ${PENPOT_MCP_HEADLESS_DIR}/nav-logic.mjs
+        target: /opt/penpot-mcp-headless/nav-logic.mjs
+        read_only: true
+      - type: bind
         source: ${PENPOT_MCP_HEADLESS_DIR}/local-proxy.mjs
         target: /opt/penpot-mcp-headless/local-proxy.mjs
         read_only: true
       - mcp_headless_artifacts:/opt/penpot-mcp-headless/artifacts
-    command: ["node", "/opt/penpot-mcp-headless/keep-open.mjs"]
     networks:
       - penpot
 

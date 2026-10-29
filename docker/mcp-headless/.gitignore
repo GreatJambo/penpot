@@ -1,3 +1,4 @@
+.env
 secret.env
 *.local.env
 artifacts/
