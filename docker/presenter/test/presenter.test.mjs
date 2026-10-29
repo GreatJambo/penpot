@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { applyDelta, clampIndex, navMessage, stateMessage } from "../public/lib/channel.mjs";
-import { exportRequest, wasmExportEnabled } from "../public/lib/export-request.mjs";
+import { exportRequest } from "../public/lib/export-request.mjs";
+import { createQueue } from "../public/lib/queue.mjs";
 import { applyKey, keyCommand, keyFromEditable } from "../public/lib/keys.mjs";
 import { RELOAD_MESSAGE, sessionExpired } from "../public/lib/session.mjs";
 import { renderNotes } from "../public/lib/markdown.mjs";
@@ -83,6 +84,26 @@ test("clicker keys move one slide and ignore typing", () => {
     assert.equal(stateMessage({ fileId: "f", pageId: "p", index: 1, total: 4, name: "S" }).index, 1);
 });
 
+test("the export queue runs at most two jobs at once", async () => {
+    const queue = createQueue(2);
+    let active = 0;
+    let peak = 0;
+    const jobs = [];
+    for (let i = 0; i < 6; i += 1) {
+        jobs.push(queue.enqueue(async () => {
+            active += 1;
+            peak = Math.max(peak, active);
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            active -= 1;
+            return i;
+        }));
+    }
+    const results = await Promise.all(jobs);
+    assert.deepEqual(results, [0, 1, 2, 3, 4, 5]);
+    assert.equal(peak, 2);
+    assert.equal(active, 0);
+});
+
 test("an access redirect asks for a reload", () => {
     assert.equal(sessionExpired({ type: "opaqueredirect", status: 0 }), true);
     assert.equal(sessionExpired({ status: 302 }), true);
@@ -110,20 +131,8 @@ test("export body is transit the exporter can read", () => {
     assert.equal(decoded.cmd.name, "export-shapes");
     assert.equal(decoded.wait, true);
     assert.equal(decoded["is-wasm"], undefined);
+    assert.equal(JSON.stringify(body).includes("is-wasm"), false);
     assert.equal(decoded.exports[0].scale, 1.5);
-    assert.equal(wasmExportEnabled("", ["render-wasm/v1"]), false);
-    assert.equal(wasmExportEnabled("enable-wasm-export", ["render-wasm/v1"]), true);
-    assert.equal(wasmExportEnabled("enable-wasm-export disable-wasm-export", ["render-wasm/v1"]), false);
-    assert.equal(wasmExportEnabled("enable-wasm-export", []), false);
-    const wasmBody = decode(exportRequest({
-        profileId: "11111111-1111-1111-1111-111111111111",
-        fileId: "22222222-2222-2222-2222-222222222222",
-        pageId: "33333333-3333-3333-3333-333333333333",
-        objectId: "44444444-4444-4444-4444-444444444444",
-        name: "Slide 1",
-        wasm: true,
-    }));
-    assert.equal(wasmBody["is-wasm"], true);
     assert.equal(decoded["profile-id"].value, "11111111-1111-1111-1111-111111111111");
     assert.equal(decoded.exports[0].type.name, "png");
     assert.equal(decoded.exports[0]["object-id"].value, "44444444-4444-4444-4444-444444444444");

@@ -1,6 +1,7 @@
-import { CHANNEL_NAME, clampIndex, edgeMessage, helloMessage, navMessage, stateMessage } from "./lib/channel.mjs";
-import { exportRequest, wasmExportEnabled } from "./lib/export-request.mjs";
-import { keyCommand, keyFromEditable } from "./lib/keys.mjs";
+import { CHANNEL_NAME, clampIndex, helloMessage, stateMessage } from "./lib/channel.mjs";
+import { exportRequest } from "./lib/export-request.mjs";
+import { applyKey } from "./lib/keys.mjs";
+import { createQueue } from "./lib/queue.mjs";
 import { renderNotes } from "./lib/markdown.mjs";
 import { readNotes } from "./lib/notes.mjs";
 import { RELOAD_MESSAGE, sessionExpired } from "./lib/session.mjs";
@@ -23,14 +24,15 @@ const deck = {
     urls: new Map(),
     blobs: new Map(),
     errors: new Map(),
-    flagsText: "",
-    wasm: false,
     startedAt: 0,
     generation: 0,
 };
 
 const inflight = new Map();
+const exportQueue = createQueue(2);
 let audienceUrl = "";
+let audienceIndex = 0;
+let audienceTotal = 0;
 
 function el(tag, attrs, children) {
     const node = document.createElement(tag);
@@ -178,7 +180,6 @@ async function fetchExport(slide, key) {
         objectId: slide.id,
         name: slide.name || "slide",
         scale: 1.5,
-        wasm: deck.wasm,
     });
     const response = await fetch(new URL("/api/export", location.origin), {
         method: "POST",
@@ -206,6 +207,9 @@ async function fetchExport(slide, key) {
         const hint = (data && (data.hint || data.message)) || `export failed (${response.status})`;
         throw new Error(String(hint));
     }
+    // Filesystem storage returns the PNG here. A 3xx is an expired
+    // access check. An S3 backend would 307 to the object store; this
+    // deployment does not use that backend.
     const asset = await fetch(new URL(String(data.uri), location.origin), {
         credentials: "include",
         redirect: "manual",
@@ -231,7 +235,7 @@ async function exportSlide(slide) {
     if (inflight.has(key)) {
         return inflight.get(key);
     }
-    const job = fetchExport(slide, key).finally(() => {
+    const job = exportQueue.enqueue(() => fetchExport(slide, key)).finally(() => {
         inflight.delete(key);
     });
     inflight.set(key, job);
@@ -252,10 +256,7 @@ async function prefetch(start) {
             order.push(i);
         }
     }
-    for (const index of order) {
-        if (generation !== deck.generation) {
-            return;
-        }
+    await Promise.all(order.map(async (index) => {
         try {
             await exportSlide(deck.slides[index]);
         } catch (error) {
@@ -269,7 +270,7 @@ async function prefetch(start) {
             drawPresenter();
             publish();
         }
-    }
+    }));
 }
 
 function goTo(index) {
@@ -289,6 +290,10 @@ function go(delta) {
 
 function drawAudience(state) {
     let src = "";
+    if (state) {
+        audienceIndex = Number(state.index) || 0;
+        audienceTotal = Number(state.total) || 0;
+    }
     if (state && state.blob) {
         if (audienceUrl) {
             URL.revokeObjectURL(audienceUrl);
@@ -470,7 +475,6 @@ async function present(fileId, pageId) {
     deck.blobs = new Map();
     deck.errors = new Map();
     inflight.clear();
-    deck.wasm = wasmExportEnabled(deck.flagsText, loaded.file.features);
     deck.startedAt = performance.now();
     rememberQuery();
     drawPresenter();
@@ -564,28 +568,21 @@ async function listFiles() {
 }
 
 function onKey(event) {
-    if (keyFromEditable(event.target)) {
+    const presenting = role === "audience" ? audienceTotal > 0 : deck.slides.length > 0;
+    if (!presenting) {
         return;
     }
-    const command = keyCommand(event);
-    if (!command) {
+    const index = role === "audience" ? audienceIndex : deck.index;
+    const total = role === "audience" ? audienceTotal : deck.slides.length;
+    const next = applyKey(event, index, total);
+    if (next == null) {
         return;
     }
-    event.preventDefault();
     if (role === "audience") {
-        channel.postMessage(command.edge ? edgeMessage(command.edge) : navMessage(command.delta));
+        channel.postMessage({ v: 1, type: "go", index: next });
         return;
     }
-    if (!deck.slides.length) {
-        return;
-    }
-    if (command.edge === "start") {
-        goTo(0);
-    } else if (command.edge === "end") {
-        goTo(deck.slides.length - 1);
-    } else {
-        go(command.delta);
-    }
+    goTo(next);
 }
 
 channel.onmessage = (event) => {
@@ -596,6 +593,10 @@ channel.onmessage = (event) => {
     }
     if (role === "presenter" && message.type === "hello") {
         publish();
+        return;
+    }
+    if (role === "presenter" && message.type === "go" && deck.slides.length) {
+        goTo(message.index);
         return;
     }
     if (role === "presenter" && message.type === "edge" && deck.slides.length) {
@@ -617,7 +618,6 @@ async function main() {
         return;
     }
     try {
-        await loadFlags();
         const files = await listFiles();
         if (!files.length) {
             signInView("No files are visible for this account.");
@@ -649,19 +649,6 @@ async function main() {
         }
         signInView(error.message);
     }
-}
-
-async function loadFlags() {
-    const response = await fetch(new URL("/js/config.js", location.origin), {
-        credentials: "include",
-        redirect: "manual",
-    });
-    if (sessionExpired(response)) {
-        throw new Error("reload");
-    }
-    const text = await response.text();
-    const match = text.match(/var penpotFlags = "([^"]*)"/);
-    deck.flagsText = match ? match[1] : "";
 }
 
 main();

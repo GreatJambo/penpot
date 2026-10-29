@@ -29,6 +29,14 @@ git -C /path/to/penpot-fork archive <merged-commit> docker/presenter \
 
 `<merged-commit>` is the commit on `GreatJambo/penpot` that contains `docker/presenter`. After that, the live tree is `~/penpot/presenter` and it is not a checkout.
 
+Append the directory variable to `~/penpot/.env` so a later three-file `up` can expand it. This checks the key name only. It does not print the file and it does not change any existing line.
+
+```shell
+if ! grep -q '^PENPOT_PRESENTER_DIR=' "$HOME/penpot/.env"; then
+  printf '\nPENPOT_PRESENTER_DIR=/home/jambo/penpot/presenter\n' >> "$HOME/penpot/.env"
+fi
+```
+
 ## Before changing the running stack
 
 1. Take a fresh backup and confirm it finished.

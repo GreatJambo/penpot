@@ -4,7 +4,7 @@ A same-origin page for presenting Penpot boards, with speaker notes and a separa
 
 Open `/presenter/` while you are signed in to Penpot. Pick a file and a page. Slides match Penpot's viewer (`get-viewer-frames`): every board except the page root, in viewer order (front of the stack first, a board before the boards inside it). A board is dropped only when `hide-in-viewer` is set. Nested boards are included when show-in-view-mode is on, which clears that flag. A hidden layer stays in the list, the same as the viewer.
 
-The current slide is a PNG from Penpot's exporter (`POST /api/export`) at scale 1.5. The exporter renders the board with Penpot's own render page. `is-wasm` is sent only when `PENPOT_FLAGS` enables `wasm-export` and the file features include `render-wasm/v1`, which is the same rule as the editor's export path. The page copies each PNG into memory as soon as it arrives, prefetches the next slide, then the rest. One export per slide is in flight at a time.
+The current slide is a PNG from Penpot's exporter (`POST /api/export`) at scale 1.5. The exporter renders the board with Penpot's own render page. The request does not send `is-wasm`: the editor never sends that flag for a PNG. The page copies each PNG into memory as soon as it arrives, then prefetches the next slide and the rest. At most two exports run at once. This page expects filesystem storage (`PENPOT_OBJECTS_STORAGE_BACKEND=fs`). A redirect while loading a slide is an expired access check, not an object-store redirect.
 
 The audience window shows only the current slide. The presenter sends the PNG bytes over a `BroadcastChannel` named `penpot-presenter-v1`, so the audience does not request `/assets/by-id/` again. Keys on either window move the deck: Right, Space, PageDown, Left, PageUp, Home, End. Space is `event.key === " "` (and `event.code === "Space"`). It does not activate a focused button.
 
@@ -52,7 +52,7 @@ return written;
 
 ## Layout
 
-`docker-compose.yaml` is the third compose file. It adds `penpot-presenter` and mounts `nginx-presenter.conf` into the frontend. The first file is the Penpot stack. The second is the MCP headless overlay, which mounts `/mcp-nav/stream`. Every `up` passes all three, or the frontend loses one of those mounts. See `ROLLOUT.md`.
+`docker-compose.yaml` is the third compose file. It adds `penpot-presenter` and mounts `nginx-presenter.conf` into the frontend. The first file is the Penpot stack. The second is the MCP headless overlay, which mounts `/mcp-nav/stream`. Every `up` passes all three, or the frontend loses one of those mounts. Compose reads `PENPOT_PRESENTER_DIR` from `~/penpot/.env`. See `ROLLOUT.md`.
 
 ```shell
 cd docker/presenter && npm test
