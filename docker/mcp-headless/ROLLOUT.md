@@ -70,9 +70,9 @@ The override adds service `penpot-mcp-headless` and one extra volume on
 `/etc/nginx/overrides/server.d/mcp-nav.conf`. The 2.18.5 image already
 includes that directory. `--pull never` keeps the pinned images.
 
-`/mcp-nav/stream` uses `proxy_read_timeout 300s`. One `open_file` waits
-at most 60s for a plugin task, 120s for the file to open, and 45s for
-one re-login (225s), which fits under that timeout.
+`/mcp-nav/stream` uses `proxy_read_timeout 300s`. One nav call aborts
+at 240s. That budget covers the task drain, the file open, one
+re-login, and the retry, and it stays inside the proxy timeout.
 
 The official `/mcp/ws` and `/mcp/stream` locations already log the
 request line, including `userToken`, for a normal browser as well. A
@@ -112,7 +112,8 @@ docker compose -p penpot --pull never \
 
 docker stop penpot-penpot-mcp-headless-1
 docker rm penpot-penpot-mcp-headless-1
-docker volume rm penpot_mcp_headless_artifacts
+# Optional. Screenshots only. Penpot data is not in this volume.
+# docker volume rm penpot_mcp_headless_artifacts
 ```
 
 If the recreate does not keep the image that was running before, start

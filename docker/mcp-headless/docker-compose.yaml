@@ -14,7 +14,10 @@
 #     -f docker/mcp-headless/docker-compose.yaml \
 #     up -d --no-deps --force-recreate penpot-frontend
 #
-# secret.env (chmod 600, never commit) must define:
+# Secret file, never commit. The sidecar runs as uid 1001:
+#   sudo chown 1001:1001 ~/.config/penpot-mcp-headless.env
+#   chmod 400 ~/.config/penpot-mcp-headless.env
+# It must define:
 #   PENPOT_PUBLIC_URI, PENPOT_INTERNAL_ORIGIN, PENPOT_EMAIL,
 #   PENPOT_PASSWORD, PENPOT_MCP_USER_TOKEN
 #

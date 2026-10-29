@@ -1,14 +1,40 @@
 /**
  * Pure decisions for the headless sidecar. No browser and no network.
  *
- * Worst case for one nav HTTP call is a task drain, a file open, and
- * one re-login. The frontend proxy_read_timeout must stay above that sum.
+ * One nav HTTP call has a hard deadline of 240s. Nginx allows 300s.
+ * Task drain, navigation, plugin wait, list walks, and one re-login
+ * all share that deadline. A step gets only the time still left.
  */
 
 export const TASK_WAIT_MS = 60_000;
 export const OPEN_WAIT_MS = 120_000;
 export const RELOGIN_BUDGET_MS = 45_000;
-export const NAV_DEADLINE_MS = TASK_WAIT_MS + OPEN_WAIT_MS + RELOGIN_BUDGET_MS;
+export const NAV_CALL_DEADLINE_MS = 240_000;
+export const PROXY_READ_TIMEOUT_MS = 300_000;
+
+export class NavTimeout extends Error {
+    constructor() {
+        super("nav call timed out");
+        this.name = "NavTimeout";
+    }
+}
+
+/**
+ * Milliseconds left for one step, capped, or a timeout if the nav
+ * deadline has already passed.
+ *
+ * @param {number} deadline
+ * @param {number} cap
+ * @param {number} [now]
+ * @returns {number}
+ */
+export function stepBudget(deadline, cap, now = Date.now()) {
+    const left = deadline - now;
+    if (left <= 0) {
+        throw new NavTimeout();
+    }
+    return Math.min(cap, left);
+}
 
 export const HOSTS_LIMIT = 32;
 export const SESSION_IDLE_MS = 30 * 60 * 1000;

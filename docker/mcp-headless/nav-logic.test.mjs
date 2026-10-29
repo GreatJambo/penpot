@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+    NAV_CALL_DEADLINE_MS,
+    NavTimeout,
+    OPEN_WAIT_MS,
+    PROXY_READ_TIMEOUT_MS,
+    RELOGIN_BUDGET_MS,
+    TASK_WAIT_MS,
     expireSessions,
     notePluginFrame,
     openWaitMode,
     rememberHost,
     sessionDead,
     shouldRecycleContext,
+    stepBudget,
 } from "./nav-logic.mjs";
 
 test("session is dead on the login hash, a visible login form, or RPC 401/403", () => {
@@ -92,6 +99,25 @@ test("idle nav sessions expire and a fresh one stays", () => {
     ]);
     expireSessions(sessions, 5_100, 1_000);
     assert.deepEqual([...sessions.keys()], ["new"]);
+});
+
+test("one nav call shares a 240s deadline inside the 300s proxy timeout", () => {
+    assert.equal(NAV_CALL_DEADLINE_MS, 240_000);
+    assert.ok(NAV_CALL_DEADLINE_MS < PROXY_READ_TIMEOUT_MS);
+    const deadline = NAV_CALL_DEADLINE_MS;
+    let now = 0;
+    const take = (cap) => {
+        const got = stepBudget(deadline, cap, now);
+        now += got;
+        return got;
+    };
+    assert.equal(take(TASK_WAIT_MS), 60_000);
+    assert.equal(take(OPEN_WAIT_MS), 120_000);
+    assert.equal(take(RELOGIN_BUDGET_MS), 45_000);
+    assert.equal(take(60_000), 15_000);
+    assert.equal(now, deadline);
+    assert.throws(() => stepBudget(deadline, 1_000, now), NavTimeout);
+    assert.equal(stepBudget(deadline, 90_000, 200_000), 40_000);
 });
 
 test("context recycle runs only when idle and old", () => {

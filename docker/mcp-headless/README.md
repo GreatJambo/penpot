@@ -16,8 +16,8 @@ File choice is a second MCP server, published by the frontend nginx
 at `/mcp-nav/stream` on the same host as `/mcp/stream`. On the live
 site that path stays behind the existing Cloudflare Access. The nav
 server checks `userToken` and accepts only the token of the account
-the sidecar logged in as. A missing or other token gets 401. The token
-is not logged.
+the sidecar logged in as. A missing or other token gets 401. The nav
+path does not log the token. Upstream `/mcp/ws` and `/mcp/stream` do.
 
 Port 4410 is only inside the compose network, for that nginx proxy.
 It is not published on the host.
@@ -45,7 +45,8 @@ workspace again for every design-tool call.
 
 ## Secret file and local routing
 
-Copy `env.example` outside this repo and `chmod 600` it. The password
+Copy `env.example` outside this repo. The sidecar runs as uid 1001.
+`sudo chown 1001:1001` the file and `chmod 400` it. The password
 goes only in that file.
 
 ```shell
@@ -67,11 +68,11 @@ mounted `/mcp-nav/stream` snippet. See `ROLLOUT.md` for the live steps
 and the rollback. Set `PENPOT_MCP_HEADLESS_DIR` before either command:
 the image build context is that directory.
 
-`/mcp-nav/stream` allows 300 seconds. One `open_file` stays under that
-(60s for a task already running, 120s to open, 45s for one re-login).
-The official `/mcp/ws` and `/mcp/stream` locations still log the query
-string, the same as they do for a desktop browser. A snippet cannot
-change those locations without defining them again.
+`/mcp-nav/stream` allows 300 seconds. One nav call aborts at 240
+seconds, including a task already running, the file open, one re-login,
+and the retry. The official `/mcp/ws` and `/mcp/stream` locations still
+log the query string, the same as they do for a desktop browser. A
+snippet cannot change those locations without defining them again.
 
 Set `PENPOT_PUBLIC_URI` to the origin the editor is configured with.
 Set `PENPOT_INTERNAL_ORIGIN` to `http://penpot-frontend:8080`. Chromium
@@ -84,5 +85,6 @@ use a Cloudflare Access service token.
 
 `docker compose logs penpot-mcp-headless` prints `idle on dashboard`,
 then `plugin connected` after `open_file`. Status and screenshots are
-in the `mcp_headless_artifacts` volume. Logs do not include the password
-or the MCP token.
+in the `mcp_headless_artifacts` volume. Sidecar logs do not include the
+password or the MCP token. Upstream `/mcp/ws` and `/mcp/stream` do log
+the token query string.

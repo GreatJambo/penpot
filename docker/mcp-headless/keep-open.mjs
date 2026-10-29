@@ -22,6 +22,8 @@ import { startLocalProxy } from "./local-proxy.mjs";
 import { startNavServer } from "./nav-mcp.mjs";
 import {
     CONTEXT_MAX_AGE_MS,
+    NAV_CALL_DEADLINE_MS,
+    NavTimeout,
     OPEN_WAIT_MS,
     RELOGIN_BUDGET_MS,
     TASK_WAIT_MS,
@@ -30,6 +32,7 @@ import {
     rememberHost,
     sessionDead,
     shouldRecycleContext,
+    stepBudget,
 } from "./nav-logic.mjs";
 
 function loadEnvFile(filePath) {
@@ -89,6 +92,7 @@ const state = {
     pluginSerial: 0,
     loggedIn: false,
     navDepth: 0,
+    navEpoch: 0,
     sockets: new Map(),
     hosts: new Set(),
     upstreams: new Set(),
@@ -120,9 +124,47 @@ function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Run one step with at most `cap` ms, and never past `deadline`.
+ * A null deadline means startup, which is not an HTTP nav call.
+ * The timer rejects while the step is still running.
+ */
+async function bounded(deadline, cap, start, capError) {
+    if (deadline == null) {
+        return start(cap);
+    }
+    const ms = stepBudget(deadline, cap);
+    const limitedByDeadline = ms < cap;
+    let timer;
+    let timerFired = false;
+    // When the step cap is tighter, let that call finish on its own
+    // timeout. The extra delay is only a backstop. When the nav
+    // deadline is tighter, reject with NavTimeout as the wait runs.
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+            timerFired = true;
+            reject(limitedByDeadline ? new NavTimeout() : capError);
+        }, limitedByDeadline ? ms : ms + 250);
+    });
+    try {
+        return await Promise.race([Promise.resolve().then(() => start(ms)), timeout]);
+    } catch (error) {
+        if (error instanceof NavTimeout || timerFired) {
+            throw error;
+        }
+        if (Date.now() >= deadline) {
+            throw new NavTimeout();
+        }
+        throw error;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 function withLock(fn) {
     const run = state.lock.then(async () => {
         state.navDepth += 1;
+        state.navEpoch += 1;
         try {
             return await fn();
         } finally {
@@ -268,12 +310,19 @@ async function readLocation(page) {
     });
 }
 
-async function dismissOverlays(page) {
+async function dismissOverlays(page, deadline = null) {
     const labels = ["Skip", "Not now", "Maybe later", "Close", "Got it"];
     for (const label of labels) {
+        if (deadline != null) {
+            stepBudget(deadline, 1);
+        }
         const button = page.getByRole("button", { name: label, exact: true });
         if (await button.count().catch(() => 0)) {
-            await button.first().click({ timeout: 1000 }).catch(() => {});
+            await bounded(deadline, 1000, (timeout) => button.first().click({ timeout }), new Error("overlay")).catch((error) => {
+                if (error instanceof NavTimeout) {
+                    throw error;
+                }
+            });
         }
     }
 }
@@ -282,49 +331,121 @@ async function loginFormVisible(page) {
     return page.locator('input[name="email"]').first().isVisible().catch(() => false);
 }
 
-async function login(page, { force = false } = {}) {
+async function login(page, { force = false, deadline = null } = {}) {
+    if (deadline != null) {
+        stepBudget(deadline, 1);
+    }
     if (force) {
         await page.context().clearCookies();
     }
-    await page.goto(`${publicUri}/#/auth/login`, { waitUntil: "domcontentloaded", timeout: 60000 });
-    await page.waitForTimeout(1500);
-    const here = await readLocation(page).catch(() => ({ login: true }));
-    const form = await loginFormVisible(page);
+    const loginTimeout = new Error("login timed out");
+    await bounded(
+        deadline,
+        60000,
+        (timeout) => page.goto(`${publicUri}/#/auth/login`, { waitUntil: "domcontentloaded", timeout }),
+        loginTimeout
+    );
+    await bounded(deadline, 1500, (timeout) => page.waitForTimeout(timeout), loginTimeout);
+    const here = await bounded(
+        deadline,
+        10000,
+        () => readLocation(page).catch(() => ({ login: true })),
+        loginTimeout
+    );
+    const form = await bounded(deadline, 5000, () => loginFormVisible(page), loginTimeout);
     if (!force && !sessionDead({ hashLogin: here.login, loginFormVisible: form })) {
+        if (deadline != null) {
+            stepBudget(deadline, 1);
+        }
         console.log("already signed in");
         state.loggedIn = true;
         return;
     }
     const emailInput = page.locator('input[name="email"]').first();
-    await emailInput.waitFor({ state: "visible", timeout: force ? 20000 : 60000 });
-    await emailInput.fill(email);
+    await bounded(
+        deadline,
+        force ? 20000 : 60000,
+        (timeout) => emailInput.waitFor({ state: "visible", timeout }),
+        loginTimeout
+    );
+    await bounded(deadline, 15000, (timeout) => emailInput.fill(email, { timeout }), loginTimeout);
     const passwordInput = page.locator('input[name="password"]').first();
-    if (!(await passwordInput.isVisible().catch(() => false))) {
-        await page.locator('[data-testid="login-submit"]').click();
-        await passwordInput.waitFor({ state: "visible", timeout: 20000 });
+    const passwordVisible = await bounded(
+        deadline,
+        5000,
+        () => passwordInput.isVisible().catch(() => false),
+        loginTimeout
+    );
+    if (!passwordVisible) {
+        await bounded(
+            deadline,
+            15000,
+            (timeout) => page.locator('[data-testid="login-submit"]').click({ timeout }),
+            loginTimeout
+        );
+        await bounded(
+            deadline,
+            20000,
+            (timeout) => passwordInput.waitFor({ state: "visible", timeout }),
+            loginTimeout
+        );
     }
-    await passwordInput.fill(password);
-    await page.locator('[data-testid="login-submit"]').click();
-    const deadline = Date.now() + 45000;
-    while (Date.now() < deadline) {
-        const now = await readLocation(page).catch(() => null);
-        if (now && !now.login && !(await loginFormVisible(page))) {
+    await bounded(deadline, 15000, (timeout) => passwordInput.fill(password, { timeout }), loginTimeout);
+    await bounded(
+        deadline,
+        15000,
+        (timeout) => page.locator('[data-testid="login-submit"]').click({ timeout }),
+        loginTimeout
+    );
+    const loopMs = deadline == null ? RELOGIN_BUDGET_MS : stepBudget(deadline, RELOGIN_BUDGET_MS);
+    const loopEnd = Date.now() + loopMs;
+    while (Date.now() < loopEnd) {
+        if (deadline != null) {
+            stepBudget(deadline, 1);
+        }
+        const now = await bounded(
+            deadline,
+            10000,
+            () => readLocation(page).catch(() => null),
+            loginTimeout
+        );
+        const stillForm = await bounded(deadline, 5000, () => loginFormVisible(page), loginTimeout);
+        if (now && !now.login && !stillForm) {
+            if (deadline != null) {
+                stepBudget(deadline, 1);
+            }
             console.log("signed in");
             state.loggedIn = true;
             return;
         }
-        const wrong = await page.getByText("Email or password is incorrect.").count().catch(() => 0);
+        const wrong = await bounded(
+            deadline,
+            5000,
+            () => page.getByText("Email or password is incorrect.").count().catch(() => 0),
+            loginTimeout
+        );
         if (wrong > 0) {
             throw new Error("login rejected");
         }
-        await page.waitForTimeout(500);
+        const pause = Math.min(500, loopEnd - Date.now());
+        if (pause <= 0) {
+            break;
+        }
+        await bounded(deadline, pause, (timeout) => page.waitForTimeout(timeout), loginTimeout);
     }
     await shot(page, "login-timeout.png");
-    throw new Error("login timed out");
+    if (deadline != null && Date.now() >= deadline) {
+        throw new NavTimeout();
+    }
+    throw loginTimeout;
 }
 
-async function rpc(page, command, params) {
-    const result = await page.evaluate(
+async function rpc(page, command, params, deadline = null) {
+    const result = await bounded(
+        deadline,
+        30000,
+        () =>
+            page.evaluate(
         async ({ command, params }) => {
             const response = await fetch(`/api/rpc/command/${command}`, {
                 method: "POST",
@@ -335,7 +456,9 @@ async function rpc(page, command, params) {
             const text = await response.text();
             return { status: response.status, text: text.slice(0, 200000) };
         },
-        { command, params }
+                { command, params }
+            ),
+        new Error(`${command} timed out`)
     );
     if (sessionDead({ rpcStatus: result.status })) {
         throw new SessionDead();
@@ -346,35 +469,39 @@ async function rpc(page, command, params) {
     return JSON.parse(result.text);
 }
 
-async function ensureAlive(page) {
-    const where = await readLocation(page).catch(() => ({ login: true }));
-    const form = await loginFormVisible(page);
+async function ensureAlive(page, deadline = null) {
+    const where = await bounded(
+        deadline,
+        15000,
+        () => readLocation(page).catch(() => ({ login: true })),
+        new Error("session check timed out")
+    );
+    const form = await bounded(deadline, 5000, () => loginFormVisible(page), new Error("session check timed out"));
     if (sessionDead({ hashLogin: Boolean(where.login), loginFormVisible: form })) {
         throw new SessionDead();
     }
 }
 
 async function withNav(fn) {
+    const deadline = Date.now() + NAV_CALL_DEADLINE_MS;
     return withLock(async () => {
+        stepBudget(deadline, 1);
         const page = state.page;
         if (!state.ready || !page) {
             throw new Error("sidecar is not logged in yet");
         }
         try {
-            await ensureAlive(page);
-            return await fn();
+            await ensureAlive(page, deadline);
+            return await fn(deadline);
         } catch (error) {
             if (!(error instanceof SessionDead)) {
                 throw error;
             }
             console.log("session dead; signing in again");
-            const started = Date.now();
-            await login(page, { force: true });
-            if (Date.now() - started > RELOGIN_BUDGET_MS) {
-                throw new Error("re-login exceeded its time budget");
-            }
+            await login(page, { force: true, deadline });
+            stepBudget(deadline, 1);
             state.ready = true;
-            return await fn();
+            return await fn(deadline);
         }
     });
 }
@@ -383,21 +510,27 @@ function idOf(row) {
     return String(row.id || row.fileId || "");
 }
 
-async function listFilesInner() {
+async function listFilesInner(deadline = null) {
     const page = state.page;
-    const teams = await rpc(page, "get-teams", {});
+    const teams = await rpc(page, "get-teams", {}, deadline);
     const tree = [];
     for (const team of teams) {
         if (team.deletedAt) {
             continue;
         }
-        const projects = await rpc(page, "get-projects", { "team-id": idOf(team) });
+        if (deadline != null) {
+            stepBudget(deadline, 1);
+        }
+        const projects = await rpc(page, "get-projects", { "team-id": idOf(team) }, deadline);
         const projectRows = [];
         for (const project of projects) {
             if (project.deletedAt) {
                 continue;
             }
-            const files = await rpc(page, "get-project-files", { "project-id": idOf(project) });
+            if (deadline != null) {
+                stepBudget(deadline, 1);
+            }
+            const files = await rpc(page, "get-project-files", { "project-id": idOf(project) }, deadline);
             projectRows.push({
                 id: idOf(project),
                 name: project.name,
@@ -426,11 +559,11 @@ function flatten(tree) {
 }
 
 async function listFiles() {
-    return withNav(() => listFilesInner());
+    return withNav((deadline) => listFilesInner(deadline));
 }
 
-async function resolveFile(args) {
-    const tree = await listFilesInner();
+async function resolveFile(args, deadline = null) {
+    const tree = await listFilesInner(deadline);
     const rows = flatten(tree);
     if (args.fileId) {
         const found = rows.find((row) => row.id === args.fileId);
@@ -456,28 +589,36 @@ async function resolveFile(args) {
     throw new Error(`name matched ${matches.length} files; pass fileId or projectId`);
 }
 
-async function waitUntilIdle(deadline = Date.now() + TASK_WAIT_MS) {
+async function waitUntilIdle(deadline = null) {
+    const taskMs = deadline == null ? TASK_WAIT_MS : stepBudget(deadline, TASK_WAIT_MS);
+    const taskEnd = Date.now() + taskMs;
     while (inflightCount() > 0) {
-        if (Date.now() > deadline) {
+        if (Date.now() >= taskEnd) {
+            if (deadline != null && Date.now() >= deadline) {
+                throw new NavTimeout();
+            }
             throw new Error("plugin still has a task in flight");
         }
         console.log(`waiting for ${inflightCount()} plugin task(s)`);
-        await sleep(200);
+        const pause = Math.min(200, taskEnd - Date.now());
+        await sleep(deadline == null ? pause : stepBudget(deadline, pause));
     }
-    const quiet = Math.min(300, Math.max(0, deadline - Date.now()));
-    await sleep(quiet);
+    const quiet = Math.min(300, Math.max(0, taskEnd - Date.now()));
+    if (quiet > 0) {
+        await sleep(deadline == null ? quiet : stepBudget(deadline, quiet));
+    }
     if (inflightCount() > 0) {
         await waitUntilIdle(deadline);
     }
 }
 
-async function currentFileInner() {
+async function currentFileInner(deadline = null) {
     const page = state.page;
     if (!page) {
         return { open: false, connected: false };
     }
-    await ensureAlive(page);
-    const where = await readLocation(page);
+    await ensureAlive(page, deadline);
+    const where = await bounded(deadline, 15000, () => readLocation(page), new Error("location timed out"));
     return {
         open: Boolean(where.fileId),
         connected: state.pluginOpen,
@@ -489,7 +630,7 @@ async function currentFileInner() {
 }
 
 async function currentFile() {
-    return withNav(() => currentFileInner());
+    return withNav((deadline) => currentFileInner(deadline));
 }
 
 function rememberTarget(file, pageId) {
@@ -500,10 +641,10 @@ function rememberTarget(file, pageId) {
     };
 }
 
-async function openFileInner(args) {
+async function openFileInner(args, deadline = null) {
     const page = state.page;
-    const file = await resolveFile(args || {});
-    const where = await readLocation(page);
+    const file = await resolveFile(args || {}, deadline);
+    const where = await bounded(deadline, 15000, () => readLocation(page), new Error("location timed out"));
     const mode = openWaitMode({
         currentFileId: where.fileId,
         targetFileId: file.id,
@@ -523,28 +664,51 @@ async function openFileInner(args) {
             mode,
         };
     }
-    await waitUntilIdle();
+    await waitUntilIdle(deadline);
     const since = state.pluginSerial;
     console.log(mode === "page" ? `opening page in ${file.id}` : `opening file ${file.id}`);
-    await page.goto(workspaceUrl(file.teamId, file.id, args.pageId || ""), {
-        waitUntil: "domcontentloaded",
-        timeout: 60000,
-    });
-    const deadline = Date.now() + OPEN_WAIT_MS;
-    while (Date.now() < deadline) {
-        await dismissOverlays(page);
-        const now = await readLocation(page).catch(() => null);
-        const form = await loginFormVisible(page);
+    await bounded(
+        deadline,
+        60000,
+        (timeout) =>
+            page.goto(workspaceUrl(file.teamId, file.id, args.pageId || ""), {
+                waitUntil: "domcontentloaded",
+                timeout,
+            }),
+        new Error("navigation timed out")
+    );
+    const openMs = deadline == null ? OPEN_WAIT_MS : stepBudget(deadline, OPEN_WAIT_MS);
+    const openEnd = Date.now() + openMs;
+    while (Date.now() < openEnd) {
+        if (deadline != null) {
+            stepBudget(deadline, 1);
+        }
+        await dismissOverlays(page, deadline);
+        const now = await bounded(
+            deadline,
+            10000,
+            () => readLocation(page).catch(() => null),
+            new Error("location timed out")
+        );
+        const form = await bounded(deadline, 5000, () => loginFormVisible(page), new Error("location timed out"));
         if (now && sessionDead({ hashLogin: now.login, loginFormVisible: form })) {
             throw new SessionDead();
         }
-        const crashed = await page.getByText("Internal Error").count().catch(() => 0);
+        const crashed = await bounded(
+            deadline,
+            5000,
+            () => page.getByText("Internal Error").count().catch(() => 0),
+            new Error("location timed out")
+        );
         if (crashed > 0) {
             throw new Error("workspace showed Internal Error");
         }
         const hashOk = now && now.fileId === file.id && (!args.pageId || now.pageId === args.pageId);
         const pluginOk = state.pluginOpen && (mode === "page" || state.pluginSerial > since);
         if (hashOk && pluginOk) {
+            if (deadline != null) {
+                stepBudget(deadline, 1);
+            }
             await shot(page, "connected.png");
             rememberTarget(file, now.pageId);
             writeStatus("connected", { fileId: file.id, teamId: file.teamId, pageId: now.pageId });
@@ -560,14 +724,21 @@ async function openFileInner(args) {
                 mode,
             };
         }
-        await sleep(500);
+        const pause = Math.min(500, openEnd - Date.now());
+        if (pause <= 0) {
+            break;
+        }
+        await sleep(deadline == null ? pause : stepBudget(deadline, pause));
     }
     await shot(page, "workspace-timeout.png");
+    if (deadline != null && Date.now() >= deadline) {
+        throw new NavTimeout();
+    }
     throw new Error(mode === "page" ? "timed out waiting for the page" : "timed out waiting for the MCP plugin");
 }
 
 async function openFile(args) {
-    return withNav(() => openFileInner(args || {}));
+    return withNav((deadline) => openFileInner(args || {}, deadline));
 }
 
 function healthy() {
@@ -661,8 +832,15 @@ async function main() {
                     console.log("recycling browser context");
                     break;
                 }
+                const epoch = state.navEpoch;
                 const where = await readLocation(page).catch(() => null);
+                if (state.navDepth > 0 || state.navEpoch !== epoch) {
+                    continue;
+                }
                 const form = await loginFormVisible(page);
+                if (state.navDepth > 0 || state.navEpoch !== epoch) {
+                    continue;
+                }
                 if (!where || sessionDead({ hashLogin: Boolean(where && where.login), loginFormVisible: form })) {
                     console.log("session ended; signing in again");
                     break;
