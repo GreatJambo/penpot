@@ -1,0 +1,28 @@
+# Swap the four images this repository builds onto a local namespace.
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.custom-images.yaml up -d
+#
+# Defaults match a build from scripts/build-selfhost-images.sh:
+#   penpot-local/{frontend,backend,exporter,mcp}:<git describe tag>
+#
+# admin-console is not built from this repo. Upstream publishes it from
+# penpot/penpot-nitrate (see docs/self-host-migration.md). Leave that
+# service on penpotapp/admin-console unless you have built that image
+# yourself and override it in a third compose file.
+#
+# Do not set PENPOT_IMAGE_PREFIX=penpotapp. That name is the official
+# registry namespace; a local tag with the same name hides penpotapp/*
+# in the local docker image store.
+
+services:
+  penpot-frontend:
+    image: "${PENPOT_IMAGE_PREFIX:-penpot-local}/frontend:${PENPOT_IMAGE_TAG:-2.18.3}"
+
+  penpot-backend:
+    image: "${PENPOT_IMAGE_PREFIX:-penpot-local}/backend:${PENPOT_IMAGE_TAG:-2.18.3}"
+
+  penpot-exporter:
+    image: "${PENPOT_IMAGE_PREFIX:-penpot-local}/exporter:${PENPOT_IMAGE_TAG:-2.18.3}"
+
+  penpot-mcp:
+    image: "${PENPOT_IMAGE_PREFIX:-penpot-local}/mcp:${PENPOT_IMAGE_TAG:-2.18.3}"
