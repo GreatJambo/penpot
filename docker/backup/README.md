@@ -13,13 +13,20 @@ start the image IDs already loaded locally (retag them, for example
 
 ## Where backups live
 
+Backups are on `/mnt/sdg` (`/dev/sdg1`), a different filesystem from
+Docker's data directory on `/dev/sda2`. The script refuses to start
+unless `mountpoint -q /mnt/sdg` succeeds and the device id of
+`BACKUP_ROOT`'s parent differs from `stat -c %d` of
+`docker info -f '{{.DockerRootDir}}'`. On that failure it writes
+`status=failed` `reason=backup_disk_missing` to stderr and exits 1
+without creating directories.
+
 | Path | Contents |
 | --- | --- |
-| `/home/jambo/penpot-backups/bin/penpot-backup.sh` | The script in this directory |
-| `/home/jambo/penpot-backups/daily/` | Timestamped dump and assets archive |
-| `/home/jambo/penpot-backups/weekly/` | Sunday copies (hard links) |
-| `/home/jambo/penpot-backups/penpot-backup.log` | One line per run |
-| `/home/jambo/penpot-backups/penpot-backup.lock` | `flock` lock |
+| `/mnt/sdg/penpot-backups/bin/penpot-backup.sh` | The script in this directory |
+| `/mnt/sdg/penpot-backups/daily/` | Timestamped dump and assets archive |
+| `/mnt/sdg/penpot-backups/penpot-backup.log` | One line per run |
+| `/mnt/sdg/penpot-backups/penpot-backup.lock` | `flock` lock |
 
 File names:
 
@@ -34,7 +41,7 @@ The machine timezone is `America/Chicago`. The user crontab sets
 `CRON_TZ=America/Chicago`, and the job is:
 
 ```cron
-0 3 * * * /home/jambo/penpot-backups/bin/penpot-backup.sh
+0 3 * * * /mnt/sdg/penpot-backups/bin/penpot-backup.sh
 ```
 
 That is 03:00 local time. The script logs start time, end time, file
@@ -42,19 +49,16 @@ sizes, and success or failure. A failed run exits non-zero.
 
 ## Retention
 
-- 7 daily pairs in `daily/`
-- 4 weekly pairs in `weekly/`
+Keep 3 dump+assets pairs in `daily/`. There is no weekly copy.
 
-A weekly copy is made when the run's local weekday is Sunday. Daily
-pruning removes only the daily names; the weekly hard links stay
-until the weekly retention drops them. Pairs are ordered by the
-timestamp in the filename (`LC_ALL=C`), not by file mtime. Keep
-counts must be positive integers. The pair just written is never
-deleted. An assets archive with no matching dump is removed.
+Pairs are ordered by the timestamp in the filename (`LC_ALL=C`), not
+by file mtime. `PENPOT_KEEP_DAILY` must be a positive integer. The
+pair just written is never deleted. An assets archive with no
+matching dump is removed.
 
 ## What one run does
 
-1. Takes an exclusive lock. A second run logs `error=already_running`
+1. Takes an exclusive lock. A second run logs `reason=already_running`
    and exits 1.
 2. Runs `pg_dump --format=custom` inside the live Postgres container
    (`penpot-penpot-postgres-1` by default). The user and database
@@ -75,7 +79,8 @@ deleted. An assets archive with no matching dump is removed.
    run. The log is capped at about 1 MiB.
 
 Overrides: `BACKUP_ROOT`, `PENPOT_PG_CONTAINER`, `PENPOT_ASSETS_VOLUME`,
-`PENPOT_TAR_IMAGE`, `PENPOT_KEEP_DAILY`, `PENPOT_KEEP_WEEKLY`.
+`PENPOT_TAR_IMAGE`, `PENPOT_KEEP_DAILY`. `BACKUP_ROOT` must already
+have a parent on a filesystem other than Docker's.
 
 ## Restore onto a throwaway stack
 
@@ -123,13 +128,13 @@ docker run -i --rm --network none --user 0:0 --entrypoint tar \
   --pull never \
   -v penpot-restore_assets:/assets \
   penpot-pinned/postgres:15 \
-  -C /assets -xzf - < /home/jambo/penpot-backups/daily/penpot-assets-STAMP.tar.gz
+  -C /assets -xzf - < /mnt/sdg/penpot-backups/daily/penpot-assets-STAMP.tar.gz
 
 # POSTGRES_USER is the superuser; there is no role named postgres.
 # The password is expanded inside the container.
 docker exec -u postgres -i penpot-restore-penpot-postgres-1 \
   sh -c 'export PGPASSWORD="$POSTGRES_PASSWORD"; exec pg_restore -h 127.0.0.1 --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" --no-password --exit-on-error --no-privileges --single-transaction' \
-  < /home/jambo/penpot-backups/daily/penpot-db-STAMP.dump
+  < /mnt/sdg/penpot-backups/daily/penpot-db-STAMP.dump
 
 # --no-deps: do not start penpot-admin-console, penpot-mcp, or any
 # other service this command did not name.
