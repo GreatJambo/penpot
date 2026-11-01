@@ -16,7 +16,8 @@ jobs:
     # The Renovate Dependency Dashboard and Renovate's GitHub Actions PRs do
     # not need triage. Other Renovate PRs (base images, Node.js, pnpm) do.
     if: >-
-      !(github.event_name == 'issues'
+      github.repository == 'penpot/penpot'
+      && !(github.event_name == 'issues'
         && github.event.issue.user.login == 'penpot-renovate[bot]')
       && !(github.event_name == 'pull_request_target'
            && github.event.pull_request.user.login == 'penpot-renovate[bot]'

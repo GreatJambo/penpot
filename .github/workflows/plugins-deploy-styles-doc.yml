@@ -27,6 +27,7 @@ permissions:
 
 jobs:
   deploy:
+    if: github.repository == 'penpot/penpot'
     runs-on: ubuntu-latest
     steps:
       - name: Extract some useful variables

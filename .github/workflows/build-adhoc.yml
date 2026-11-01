@@ -24,6 +24,7 @@ permissions: {}
 
 jobs:
   build-bundle:
+    if: github.repository == 'penpot/penpot'
     permissions:
       contents: read
     uses: ./.github/workflows/build-bundle.yml
@@ -38,6 +39,7 @@ jobs:
       force: ${{ inputs.force }}
 
   build-docker:
+    if: github.repository == 'penpot/penpot'
     needs: build-bundle
     permissions:
       contents: read
@@ -60,6 +62,7 @@ jobs:
       force: ${{ inputs.force }}
 
   build-docker-admin-console:
+    if: github.repository == 'penpot/penpot'
     permissions: {}
     uses: ./.github/workflows/build-docker-admin-console.yml
     secrets:

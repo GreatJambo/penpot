@@ -13,6 +13,7 @@ permissions: {}
 
 jobs:
   build-bundle:
+    if: github.repository == 'penpot/penpot'
     permissions:
       contents: read
     uses: ./.github/workflows/build-bundle.yml
@@ -26,6 +27,7 @@ jobs:
       gh_ref: "hiru-tokens-in-libs"
 
   build-docker:
+    if: github.repository == 'penpot/penpot'
     needs: build-bundle
     permissions:
       contents: read

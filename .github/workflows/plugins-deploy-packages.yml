@@ -75,7 +75,7 @@ jobs:
 
   colors-to-tokens-plugin:
     needs: detect-changes
-    if: github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.colors_to_tokens == 'true'
+    if: github.repository == 'penpot/penpot' && (github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.colors_to_tokens == 'true')
     uses: ./.github/workflows/plugins-deploy-package.yml
     secrets:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -87,7 +87,7 @@ jobs:
 
   contrast-plugin:
     needs: detect-changes
-    if: github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.contrast == 'true'
+    if: github.repository == 'penpot/penpot' && (github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.contrast == 'true')
     uses: ./.github/workflows/plugins-deploy-package.yml
     secrets:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -99,7 +99,7 @@ jobs:
 
   create-palette-plugin:
     needs: detect-changes
-    if: github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.create_palette == 'true'
+    if: github.repository == 'penpot/penpot' && (github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.create_palette == 'true')
     uses: ./.github/workflows/plugins-deploy-package.yml
     secrets:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -111,7 +111,7 @@ jobs:
 
   icons-plugin:
     needs: detect-changes
-    if: github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.icons == 'true'
+    if: github.repository == 'penpot/penpot' && (github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.icons == 'true')
     uses: ./.github/workflows/plugins-deploy-package.yml
     secrets:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -123,7 +123,7 @@ jobs:
 
   lorem-ipsum-plugin:
     needs: detect-changes
-    if: github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.lorem_ipsum == 'true'
+    if: github.repository == 'penpot/penpot' && (github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.lorem_ipsum == 'true')
     uses: ./.github/workflows/plugins-deploy-package.yml
     secrets:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -135,7 +135,7 @@ jobs:
 
   rename-layers-plugin:
     needs: detect-changes
-    if: github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.rename_layers == 'true'
+    if: github.repository == 'penpot/penpot' && (github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.rename_layers == 'true')
     uses: ./.github/workflows/plugins-deploy-package.yml
     secrets:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -147,7 +147,7 @@ jobs:
 
   table-plugin:
     needs: detect-changes
-    if: github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.table == 'true'
+    if: github.repository == 'penpot/penpot' && (github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.table == 'true')
     uses: ./.github/workflows/plugins-deploy-package.yml
     secrets:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -161,7 +161,7 @@ jobs:
   #   Add more jobs for other plugins below, following the same pattern
   #     another-plugin:
   #       needs: detect-changes
-  #       if: github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.another_plugin == 'true'
+  #       if: github.repository == 'penpot/penpot' && (github.event_name == 'workflow_dispatch' || needs.detect-changes.outputs.another_plugin == 'true')
   #       uses: ./.github/workflows/plugins-deploy-package.yml
   #       secrets: inherit
   #       with:

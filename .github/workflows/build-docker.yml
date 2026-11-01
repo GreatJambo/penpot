@@ -76,6 +76,7 @@ permissions:
 jobs:
   # ── 1. Resolve the build key and check the whole set at once ───────────
   prepare:
+    if: github.repository == 'penpot/penpot'
     name: Prepare
     runs-on: penpot-standar-runner
     timeout-minutes: 15
