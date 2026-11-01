@@ -21,6 +21,7 @@ env:
 jobs:
   # ── 1. Pick an existing develop bundle and detect what changed ────────
   prepare:
+    if: github.repository == 'penpot/penpot'
     name: Prepare
     runs-on: penpot-standar-runner
     timeout-minutes: 10

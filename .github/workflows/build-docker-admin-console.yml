@@ -43,6 +43,7 @@ permissions: {}
 
 jobs:
   build-nitrate-docker:
+    if: github.repository == 'penpot/penpot'
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.ORG_WORKFLOW_TOKEN }}

@@ -12,6 +12,7 @@ concurrency:
 
 jobs:
   build-and-push:
+    if: github.repository == 'penpot/penpot'
     name: Build and push DevEnv Docker image
     runs-on: penpot-standar-runner
     timeout-minutes: 90

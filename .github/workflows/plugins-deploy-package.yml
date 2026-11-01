@@ -40,6 +40,7 @@ permissions:
 
 jobs:
   deploy:
+    if: github.repository == 'penpot/penpot'
     runs-on: penpot-standar-runner
     container:
       image: penpotapp/devenv:latest
